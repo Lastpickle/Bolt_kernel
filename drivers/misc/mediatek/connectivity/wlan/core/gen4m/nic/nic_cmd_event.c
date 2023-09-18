@@ -120,7 +120,6 @@ const struct NIC_CAPABILITY_V2_REF_TABLE
 struct MIB_INFO_STAT g_arMibInfo[ENUM_BAND_NUM];
 uint8_t fgEfuseCtrlAxOn = 1; /* run time control if support AX by efuse */
 
-
 /*******************************************************************************
  *                            F U N C T I O N   D A T A
  *******************************************************************************
@@ -2433,7 +2432,6 @@ void nicCmdEventQueryStaStatistics(IN struct ADAPTER
 #ifdef CFG_SUPPORT_LINK_QUALITY_MONITOR
 	struct WIFI_LINK_QUALITY_INFO *prLinkQualityInfo;
 #endif
-
 	ASSERT(prAdapter);
 	ASSERT(prCmdInfo);
 	ASSERT(pucEventBuf);
