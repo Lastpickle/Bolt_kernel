@@ -1200,7 +1200,7 @@ static struct usb_composite_driver android_usb_driver = {
 #endif
 };
 
-#define USB_STATE_MONITOR_DELAY 3000
+#define USB_STATE_MONITOR_DELAY 9000
 static struct delayed_work android_usb_state_monitor_work;
 static void do_android_usb_state_monitor_work(struct work_struct *work)
 {
