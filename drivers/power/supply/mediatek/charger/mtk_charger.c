@@ -1380,7 +1380,7 @@ void mtk_charger_int_handler(void)
 		if (mt_get_charger_type() != CHARGER_UNKNOWN) {
 			oplus_wake_up_usbtemp_thread();
 
-			pr_err("%s, Charger Plug In\n", __func__);
+			pr_debug("%s, Charger Plug In\n", __func__);
 			charger_manager_notifier(pinfo, CHARGER_NOTIFY_START_CHARGING);
 			pinfo->step_status = STEP_CHG_STATUS_STEP1;
 			pinfo->step_status_pre = STEP_CHG_STATUS_INVALID;
