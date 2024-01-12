@@ -1,6 +1,6 @@
 #
 # Automatically generated file; DO NOT EDIT.
-# Linux/arm64 4.14.334 Kernel Configuration
+# Linux/arm64 4.14.336 Kernel Configuration
 #
 CONFIG_ARM64=y
 CONFIG_64BIT=y
@@ -50,6 +50,7 @@ CONFIG_CROSS_COMPILE=""
 # CONFIG_COMPILE_TEST is not set
 CONFIG_LOCALVERSION="-Bolt-V3"
 # CONFIG_LOCALVERSION_AUTO is not set
+# CONFIG_INLINE_OPTIMIZATION is not set
 CONFIG_DEFAULT_HOSTNAME="PrathamsBuilds"
 CONFIG_SWAP=y
 # CONFIG_SYSVIPC is not set
