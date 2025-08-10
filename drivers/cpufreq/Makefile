@@ -20,6 +20,7 @@ obj-y		+= cpufreq_mtk.o
 endif
 
 # CPUfreq governors
+obj-$(CONFIG_CPU_FREQ_GOV_SMARTMAX_EPS)	+= cpufreq_smartmax_eps.o
 obj-$(CONFIG_CPU_FREQ_GOV_PERFORMANCE)	+= cpufreq_performance.o
 obj-$(CONFIG_CPU_FREQ_GOV_POWERSAVE)	+= cpufreq_powersave.o
 obj-$(CONFIG_CPU_FREQ_GOV_USERSPACE)	+= cpufreq_userspace.o
