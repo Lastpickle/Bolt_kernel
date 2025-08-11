@@ -86,6 +86,60 @@ static struct workqueue_struct *smartmax_eps_wq;
 /* debug mask */
 static unsigned int debug_mask = 0;
 
+/* ----------------- sysfs tunable interface ----------------- */
+
+/* helper macro to define show/store and DEVICE_ATTR_RW for an unsigned int tunable */
+#define define_tunable(_name)                                              \
+static ssize_t show_##_name(struct device *dev,                            \
+        struct device_attribute *attr, char *buf)                          \
+{                                                                          \
+    return scnprintf(buf, PAGE_SIZE, "%u\n", _name);                       \
+}                                                                          \
+static ssize_t store_##_name(struct device *dev,                           \
+        struct device_attribute *attr, const char *buf, size_t count)      \
+{                                                                          \
+    unsigned int val;                                                      \
+    if (kstrtouint(buf, 0, &val))                                          \
+        return -EINVAL;                                                    \
+    _name = val;                                                           \
+    return count;                                                          \
+}                                                                          \
+static DEVICE_ATTR_RW(_name);
+
+/* define per-tunable device attributes */
+define_tunable(up_rate);
+define_tunable(down_rate);
+define_tunable(ramp_up_step);
+define_tunable(ramp_down_step);
+define_tunable(sampling_rate);
+define_tunable(awake_ideal_freq);
+define_tunable(suspend_ideal_freq);
+define_tunable(max_cpu_load);
+define_tunable(min_cpu_load);
+define_tunable(input_boost_duration);
+define_tunable(debug_mask);
+
+/* attribute list and group */
+static struct attribute *smartmax_eps_attrs[] = {
+    &dev_attr_up_rate.attr,
+    &dev_attr_down_rate.attr,
+    &dev_attr_ramp_up_step.attr,
+    &dev_attr_ramp_down_step.attr,
+    &dev_attr_sampling_rate.attr,
+    &dev_attr_awake_ideal_freq.attr,
+    &dev_attr_suspend_ideal_freq.attr,
+    &dev_attr_max_cpu_load.attr,
+    &dev_attr_min_cpu_load.attr,
+    &dev_attr_input_boost_duration.attr,
+    &dev_attr_debug_mask.attr,
+    NULL,
+};
+
+static const struct attribute_group smartmax_eps_attr_group = {
+    .name  = "smartmax_eps",
+    .attrs = smartmax_eps_attrs,
+};
+
 /* helper: convert cputime64 (ns) to jiffies safely */
 static inline unsigned long my_cputime64_to_jiffies(u64 cputime_ns)
 {
@@ -274,6 +328,8 @@ static int cpufreq_gov_start(struct cpufreq_policy *policy)
     this_smartmax_eps->freq_table = policy->freq_table;
     this_smartmax_eps->old_freq = policy->cur;
     mutex_init(&this_smartmax_eps->timer_mutex);
+    if (sysfs_create_group(&policy->kobj, &smartmax_eps_attr_group))
+    pr_warn("smartmax_eps: failed to create sysfs group\n");
 
     /* schedule initial work */
     dbs_timer_init(this_smartmax_eps);
@@ -284,6 +340,7 @@ static int cpufreq_gov_start(struct cpufreq_policy *policy)
 static void cpufreq_gov_stop(struct cpufreq_policy *policy)
 {
     struct smartmax_eps_info_s *this_smartmax_eps = &per_cpu(smartmax_eps_info, policy->cpu);
+    sysfs_remove_group(&policy->kobj, &smartmax_eps_attr_group);
 
     dbs_timer_exit(this_smartmax_eps);
     this_smartmax_eps->cur_policy = NULL;
