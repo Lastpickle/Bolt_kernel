@@ -32,6 +32,12 @@
 #include <linux/cpumask.h>
 #include <linux/cpufreq.h>
 #include <linux/sched.h>
+
+int nr = 0;
+rcu_read_lock();
+nr = rq->nr_running; /* rq from cpu_rq() */
+rcu_read_unlock();
+
 #include <linux/tick.h>
 #include <linux/timer.h>
 #include <linux/workqueue.h>
