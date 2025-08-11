@@ -305,10 +305,9 @@ static int cpufreq_governor_smartmax_eps(struct cpufreq_policy *policy,
 #ifndef CONFIG_CPU_FREQ_DEFAULT_GOV_SMARTMAX_EPS
 static
 #endif
-struct cpufreq_governor cpufreq_gov_smartmax_eps = { 
-    .name = "smartmax_eps", 
-    .governor = cpufreq_governor_smartmax_eps, 
-    .max_transition_latency = TRANSITION_LATENCY_LIMIT, 
+static struct cpufreq_governor cpufreq_gov_smartmax_eps = {
+    .name = "smartmax_eps",
+    .limits = NULL,  // No limits function
     .owner = THIS_MODULE,
     };
 
