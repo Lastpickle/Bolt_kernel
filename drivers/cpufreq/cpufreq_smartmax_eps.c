@@ -40,6 +40,14 @@
 #include <linux/input.h>
 #include <linux/kthread.h>
 #include <linux/slab.h>
+#include <linux/ktime.h>
+#include <linux/jiffies.h>
+
+static inline unsigned long my_cputime64_to_jiffies(u64 cputime)
+{
+    struct ktime kt = ns_to_ktime(cputime);
+    return ktime_to_jiffies(kt);
+}
 #include <linux/sched/task.h>
 #include <linux/kernel_stat.h>
 u64 get_cpu_idle_time(unsigned int cpu, u64 *wall, int io_busy);
