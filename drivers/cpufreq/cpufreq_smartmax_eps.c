@@ -33,10 +33,16 @@
 #include <linux/cpufreq.h>
 #include <linux/sched.h>
 
+struct rq *rq = cpu_rq(smp_processor_id());
 int nr = 0;
+
 rcu_read_lock();
-nr = rq->nr_running; /* rq from cpu_rq() */
+nr = rq->nr_running;
 rcu_read_unlock();
+
+if (ramp_dir > 0 && nr > 1) {
+    // your code
+}
 
 #include <linux/tick.h>
 #include <linux/timer.h>
