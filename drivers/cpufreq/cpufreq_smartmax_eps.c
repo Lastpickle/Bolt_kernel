@@ -1002,13 +1002,13 @@ static ssize_t store_min_sampling_rate(struct kobject *a, struct attribute *b,
 	return -EINVAL;	
 }
 
-#define define_global_rw_attr(_name)		\
-static struct global_attr _name##_attr =	\
-	__ATTR(_name, 0644, show_##_name, store_##_name)
+#define define_global_rw_attr(_name)        \
+static struct device_attribute _name##_attr =    \
+    __ATTR(_name, 0644, show_##_name, store_##_name)
 
-#define define_global_ro_attr(_name)		\
-static struct global_attr _name##_attr =	\
-	__ATTR(_name, 0444, show_##_name, store_##_name)
+#define define_global_ro_attr(_name)        \
+static struct device_attribute _name##_attr =    \
+    __ATTR(_name, 0444, show_##_name, NULL)
 
 define_global_rw_attr(debug_mask);
 define_global_rw_attr(up_rate);
