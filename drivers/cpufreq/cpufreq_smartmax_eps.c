@@ -388,7 +388,7 @@ inline static void target_freq(struct cpufreq_policy *policy,
 	// apply policy limits - just to be sure
 	new_freq = validate_freq(policy, new_freq);
 
-	if (!cpufreq_frequency_table_target(policy, table, new_freq, &index)) {
+	if (!cpufreq_frequency_table_target(policy, table, new_freq)) {
 		target = table[index].frequency;
 		if (target == old_freq) {
 			if (new_freq > old_freq) {
