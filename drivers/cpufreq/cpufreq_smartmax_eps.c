@@ -5,9 +5,7 @@
  * Key compatibility changes:
  *  - uses cpufreq_frequency_table_target(policy, target_freq, relation)
  *  - uses cpufreq_driver_target(...)
- *  - uses cpu_rq() inside functions
- *  - replaces cputime helpers with custom conversion
- *  - sysfs device_attribute style
+ *  - sysfs tunables (global, attached once to policy0)
  *
  * Tuning defaults placed below; one governor instance for big+little.
  */
@@ -59,7 +57,7 @@ struct smartmax_eps_info_s {
     unsigned long freq_change_time; /* in microseconds */
     unsigned int old_freq;
     struct cpufreq_frequency_table *freq_table;
-    /* keep any extra fields required by original logic */
+    /* extra field for original logic if needed */
     u64 prev_cpu_nice;
 };
 
@@ -86,16 +84,16 @@ static struct workqueue_struct *smartmax_eps_wq;
 /* debug mask */
 static unsigned int debug_mask = 0;
 
-/* ----------------- sysfs tunable interface ----------------- */
+/* ----------------- sysfs tunable interface (global, single group on policy0) ----------------- */
 
-/* helper macro to define show/store and DEVICE_ATTR_RW for an unsigned int tunable */
+/* Fixed macro: define show/store functions first, then DEVICE_ATTR_RW */
 #define define_tunable(_name)                                              \
-static ssize_t show_##_name(struct device *dev,                            \
+static ssize_t _name##_show(struct device *dev,                            \
         struct device_attribute *attr, char *buf)                          \
 {                                                                          \
     return scnprintf(buf, PAGE_SIZE, "%u\n", _name);                       \
 }                                                                          \
-static ssize_t store_##_name(struct device *dev,                           \
+static ssize_t _name##_store(struct device *dev,                           \
         struct device_attribute *attr, const char *buf, size_t count)      \
 {                                                                          \
     unsigned int val;                                                      \
@@ -106,7 +104,7 @@ static ssize_t store_##_name(struct device *dev,                           \
 }                                                                          \
 static DEVICE_ATTR_RW(_name);
 
-/* define per-tunable device attributes */
+/* create device attrs for each tunable */
 define_tunable(up_rate);
 define_tunable(down_rate);
 define_tunable(ramp_up_step);
@@ -140,17 +138,17 @@ static const struct attribute_group smartmax_eps_attr_group = {
     .attrs = smartmax_eps_attrs,
 };
 
-/* helper: convert cputime64 (ns) to jiffies safely */
+/* ----------------- helpers ----------------- */
+
+/* convert nanoseconds to jiffies safely (fallback) */
 static inline unsigned long my_cputime64_to_jiffies(u64 cputime_ns)
 {
-    /* avoid using ktime_to_jiffies (may not exist); convert nanoseconds -> jiffies */
-    /* jiffies = ceil( cputime_ns / (NSEC_PER_SEC / HZ) ) but we prefer floor */
     if (!cputime_ns)
         return 0;
     return div_u64(cputime_ns, NSEC_PER_SEC / HZ);
 }
 
-/* helper: remember time in microseconds */
+/* now in microseconds */
 static inline unsigned long now_us(void)
 {
     return (unsigned long)(ktime_to_ns(ktime_get()) / 1000ULL);
@@ -163,7 +161,7 @@ static inline unsigned long now_us(void)
 /* forward declarations */
 static int cpufreq_governor_smartmax_eps(struct cpufreq_policy *policy, unsigned int event);
 
-/* Compatibility: some trees may not define these enum values */
+/* Compatibility: define gov event constants if absent */
 #ifndef CPUFREQ_GOV_START
 #define CPUFREQ_GOV_START   0
 #define CPUFREQ_GOV_STOP    1
@@ -182,23 +180,19 @@ static struct cpufreq_governor cpufreq_gov_smartmax_eps = {
     .owner = THIS_MODULE,
 };
 
-/* ----------------- frequency table helpers compatible with 4.14 ----------------- */
-
-/* Wrapper that returns an index (>=0) or negative on failure, uses 4.14 API.
- * relation should be CPUFREQ_RELATION_{L,H,C}.
- */
+/* Wrapper returning index or negative using 4.14 API */
 static inline int get_freq_index(struct cpufreq_policy *policy, unsigned int target_freq, unsigned int relation)
 {
     return cpufreq_frequency_table_target(policy, target_freq, relation);
 }
 
-/* Apply target frequency using cpufreq_driver_target (4.14) */
+/* Apply target using 4.14 driver API */
 static inline int set_policy_target(struct cpufreq_policy *policy, unsigned int target, unsigned int relation)
 {
     return cpufreq_driver_target(policy, target, relation);
 }
 
-/* Validate freq using policy limits (keeps old validate_freq() behaviour if present) */
+/* Validate freq using policy limits */
 static inline unsigned int validate_freq_local(struct cpufreq_policy *policy, unsigned int freq)
 {
     if (!policy)
@@ -208,7 +202,7 @@ static inline unsigned int validate_freq_local(struct cpufreq_policy *policy, un
     return freq;
 }
 
-/* ----------------- main target function (converted for 4.14) ------------------ */
+/* ----------------- core: choose and set frequency ------------------ */
 
 static inline void target_freq(struct cpufreq_policy *policy,
         struct smartmax_eps_info_s *this_smartmax_eps,
@@ -223,12 +217,11 @@ static inline void target_freq(struct cpufreq_policy *policy,
 
     new_freq = validate_freq_local(policy, new_freq);
 
-    /* Try exact/closest match using 4.14 API (returns index or negative) */
+    /* Use 4.14 API which returns index or negative */
     idx = get_freq_index(policy, new_freq, prefered_relation);
     if (idx >= 0) {
         target = policy->freq_table[idx].frequency;
         if (target == old_freq) {
-            /* try prefered alternative */
             if (new_freq > old_freq) {
                 int tmp_idx = get_freq_index(policy, new_freq + 1, CPUFREQ_RELATION_L);
                 if (tmp_idx >= 0)
@@ -249,14 +242,14 @@ static inline void target_freq(struct cpufreq_policy *policy,
     dprintk(SMARTMAX_EPS_DEBUG_JUMPS, "%u: jumping to %u (%u) cpu %u\n",
             old_freq, new_freq, target, cpu);
 
-    /* Set frequency */
+    /* Set frequency via driver */
     set_policy_target(policy, target, prefered_relation);
 
-    /* remember last change time in microseconds */
+    /* remember last change time */
     this_smartmax_eps->freq_change_time = now_us();
 }
 
-/* ----------------- work function (simplified, preserves behaviour) ------------- */
+/* ----------------- simplified work function (placeholder algorithm) ------------- */
 
 static void do_smartmax_work(struct work_struct *work)
 {
@@ -269,23 +262,15 @@ static void do_smartmax_work(struct work_struct *work)
     if (!policy)
         return;
 
-    /* sample CPU load or other signals here (preserve original algorithm) */
-    /* For brevity we implement a simple placeholder algorithm:
-     *   - if cpu util > max_cpu_load => ramp up
-     *   - if cpu util < min_cpu_load => ramp down
-     *
-     * In real code, port over the original sampling/statistics logic.
-     */
+    /* sample CPU load or other signals here (original algorithm omitted for brevity) */
 
-    /* get current frequency */
     old_freq = policy->cur;
 
-    /* Placeholder: choose new_freq = ideal when awake/suspended */
-    if (cpu_online(this->cpu)) {
+    /* placeholder: pick ideal awake/suspend freq */
+    if (cpu_online(this->cpu))
         new_freq = awake_ideal_freq;
-    } else {
+    else
         new_freq = suspend_ideal_freq;
-    }
 
     if (new_freq > old_freq)
         ramp_dir = 1;
@@ -294,29 +279,28 @@ static void do_smartmax_work(struct work_struct *work)
     else
         ramp_dir = 0;
 
-    /* call target setter with relation "closest" */
     target_freq(policy, this, new_freq, old_freq, CPUFREQ_RELATION_C);
 
-    /* schedule next run */
-    queue_delayed_work_on(this->cpu, smartmax_eps_wq, &this->work, msecs_to_jiffies(sampling_rate / 1000));
+    /* schedule next run (sampling_rate is in microseconds) */
+    queue_delayed_work_on(this->cpu, smartmax_eps_wq, &this->work, usecs_to_jiffies(sampling_rate));
 }
 
-/* ----------------- timer init/exit ----------------- */
+/* ----------------- timer start/stop helpers ----------------- */
 
 static inline void dbs_timer_init(struct smartmax_eps_info_s *this_smartmax_eps)
 {
     INIT_DEFERRABLE_WORK(&this_smartmax_eps->work, do_smartmax_work);
-    schedule_delayed_work_on(this_smartmax_eps->cpu, &this_smartmax_eps->work, msecs_to_jiffies(sampling_rate / 1000));
+    schedule_delayed_work_on(this_smartmax_eps->cpu, &this_smartmax_eps->work, usecs_to_jiffies(sampling_rate));
 }
 
 static inline void dbs_timer_exit(struct smartmax_eps_info_s *this_smartmax_eps)
 {
-    cancel_delayed_work(&this_smartmax_eps->work);
+    cancel_delayed_work_sync(&this_smartmax_eps->work);
 }
 
 /* ----------------- governor interface functions -------------------- */
 
-/* start/stop not strictly required; kept as simple wrappers */
+/* start/stop; create sysfs group only for cpu 0 (global tunables) */
 static int cpufreq_gov_start(struct cpufreq_policy *policy)
 {
     struct smartmax_eps_info_s *this_smartmax_eps;
@@ -328,8 +312,12 @@ static int cpufreq_gov_start(struct cpufreq_policy *policy)
     this_smartmax_eps->freq_table = policy->freq_table;
     this_smartmax_eps->old_freq = policy->cur;
     mutex_init(&this_smartmax_eps->timer_mutex);
-    if (sysfs_create_group(&policy->kobj, &smartmax_eps_attr_group))
-    pr_warn("smartmax_eps: failed to create sysfs group\n");
+
+    /* Create sysfs group once on policy0 (global tunables) */
+    if (cpu == 0) {
+        if (sysfs_create_group(&policy->kobj, &smartmax_eps_attr_group))
+            pr_warn("smartmax_eps: failed to create sysfs group\n");
+    }
 
     /* schedule initial work */
     dbs_timer_init(this_smartmax_eps);
@@ -340,13 +328,16 @@ static int cpufreq_gov_start(struct cpufreq_policy *policy)
 static void cpufreq_gov_stop(struct cpufreq_policy *policy)
 {
     struct smartmax_eps_info_s *this_smartmax_eps = &per_cpu(smartmax_eps_info, policy->cpu);
-    sysfs_remove_group(&policy->kobj, &smartmax_eps_attr_group);
+
+    /* remove sysfs group only on policy0 */
+    if (policy->cpu == 0)
+        sysfs_remove_group(&policy->kobj, &smartmax_eps_attr_group);
 
     dbs_timer_exit(this_smartmax_eps);
     this_smartmax_eps->cur_policy = NULL;
 }
 
-/* main governor callback (start/stop are used by core; event handler can be NULL) */
+/* main governor callback */
 static int cpufreq_governor_smartmax_eps(struct cpufreq_policy *policy, unsigned int event)
 {
     switch (event) {
@@ -383,7 +374,7 @@ static int __init cpufreq_smartmax_eps_init(void)
         mutex_init(&this->timer_mutex);
     }
 
-    /* register governor */
+    /* register governor callbacks */
     cpufreq_gov_smartmax_eps.start = cpufreq_gov_start;
     cpufreq_gov_smartmax_eps.stop  = cpufreq_gov_stop;
     cpufreq_gov_smartmax_eps.init  = NULL;
