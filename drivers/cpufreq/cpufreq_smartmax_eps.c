@@ -307,7 +307,7 @@ static
 #endif
 static struct cpufreq_governor cpufreq_gov_smartmax_eps = {
     .name = "smartmax_eps",
-    .limits = NULL,  // No limits function
+    .policy = cpufreq_governor_smartmax_eps,  // your governor function
     .owner = THIS_MODULE,
     };
 
