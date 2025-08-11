@@ -952,8 +952,10 @@ unsigned int cpufreq_generic_get(unsigned int cpu);
 int cpufreq_generic_init(struct cpufreq_policy *policy,
 		struct cpufreq_frequency_table *table,
 		unsigned int transition_latency);
-#endif /* _LINUX_CPUFREQ_H */
-#endif defined(CONFIG_CPU_FREQ_DEFAULT_GOV_SMARTMAX_EPS)
+
+#ifdef CONFIG_CPU_FREQ_DEFAULT_GOV_SMARTMAX_EPS
 extern struct cpufreq_governor cpufreq_gov_smartmax_eps;
 #define CPUFREQ_DEFAULT_GOVERNOR (&cpufreq_gov_smartmax_eps)
-#endif
+#endif /* CONFIG_CPU_FREQ_DEFAULT_GOV_SMARTMAX_EPS */
+
+#endif /* _LINUX_CPUFREQ_H */
