@@ -30,7 +30,6 @@
 #include <linux/cpu.h>
 #include <linux/cpumask.h>
 #include <linux/cpufreq.h>
-#include <linux/cputime.h>
 #include <linux/sched.h>
 #include <linux/tick.h>
 #include <linux/timer.h>
