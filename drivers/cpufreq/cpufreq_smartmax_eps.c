@@ -109,6 +109,13 @@ static inline unsigned long now_us(void)
 /* forward declarations */
 static int cpufreq_governor_smartmax_eps(struct cpufreq_policy *policy, unsigned int event);
 
+/* Compatibility: some trees may not define these enum values */
+#ifndef CPUFREQ_GOV_START
+#define CPUFREQ_GOV_START   0
+#define CPUFREQ_GOV_STOP    1
+#define CPUFREQ_GOV_LIMITS  2
+#endif
+
 /* governor struct (4.14 style) */
 static struct cpufreq_governor cpufreq_gov_smartmax_eps = {
     .name = "smartmax_eps",
@@ -220,7 +227,7 @@ static void do_smartmax_work(struct work_struct *work)
     old_freq = policy->cur;
 
     /* Placeholder: choose new_freq = ideal when awake/suspended */
-    if (cpu_is_online(this->cpu)) {
+    if (cpu_online(this->cpu)) {
         new_freq = awake_ideal_freq;
     } else {
         new_freq = suspend_ideal_freq;
