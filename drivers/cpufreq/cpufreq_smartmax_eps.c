@@ -45,8 +45,8 @@
 
 static inline unsigned long my_cputime64_to_jiffies(u64 cputime)
 {
-    struct ktime kt = ns_to_ktime(cputime);
-    return ktime_to_jiffies(kt);
+    /* cputime in nanoseconds, convert to jiffies */
+    return div_u64(cputime + (NSEC_PER_SEC / HZ) - 1, NSEC_PER_SEC / HZ);
 }
 #include <linux/sched/task.h>
 #include <linux/kernel_stat.h>
