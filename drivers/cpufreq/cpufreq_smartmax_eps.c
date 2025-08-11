@@ -387,23 +387,23 @@ inline static void target_freq(struct cpufreq_policy *policy,
 	// apply policy limits - just to be sure
 	new_freq = validate_freq(policy, new_freq);
 
-	if (!cpufreq_frequency_table_target(policy, table, new_freq,
-					prefered_relation, &index)) {
+	if (!cpufreq_frequency_table_target(policy, table, new_freq, &index)) {
 		target = table[index].frequency;
 		if (target == old_freq) {
-			// if for example we are ramping up to *at most* current + ramp_up_step
-			// but there is no such frequency higher than the current, try also
-			// to ramp up to *at least* current + ramp_up_step.
-			if (new_freq > old_freq && prefered_relation == CPUFREQ_RELATION_H
-					&& !cpufreq_frequency_table_target(policy, table, new_freq,
-							CPUFREQ_RELATION_L, &index))
-				target = table[index].frequency;
-			// simlarly for ramping down:
-			else if (new_freq < old_freq
-					&& prefered_relation == CPUFREQ_RELATION_L
-					&& !cpufreq_frequency_table_target(policy, table, new_freq,
-							CPUFREQ_RELATION_H, &index))
-				target = table[index].frequency;
+			// if ramping up to *at most* current + ramp_up_step
+			// but no frequency higher than current, try also
+			// ramp up to *at least* current + ramp_up_step.
+			if (new_freq > old_freq) {
+				int tmp_index;
+				if (!cpufreq_frequency_table_target(policy, table, new_freq + 1, &tmp_index))
+					target = table[tmp_index].frequency;
+			}
+			// similarly for ramping down:
+			else if (new_freq < old_freq) {
+				int tmp_index;
+				if (!cpufreq_frequency_table_target(policy, table, new_freq - 1, &tmp_index))
+					target = table[tmp_index].frequency;
+			}
 		}
 
 		// no change
@@ -417,6 +417,7 @@ inline static void target_freq(struct cpufreq_policy *policy,
 	dprintk(SMARTMAX_EPS_DEBUG_JUMPS, "%d: jumping to %d (%d) cpu %d\n", old_freq, new_freq, target, cpu);
 
 	__cpufreq_driver_target(policy, target, prefered_relation);
+}
 
 	// remember last time we changed frequency
 	this_smartmax_eps->freq_change_time = ktime_to_us(ktime_get());
