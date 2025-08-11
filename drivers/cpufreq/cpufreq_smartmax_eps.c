@@ -408,35 +408,36 @@ inline static void target_freq(struct cpufreq_policy *policy,
 	// apply policy limits - just to be sure
 	new_freq = validate_freq(policy, new_freq);
 
-	if (!cpufreq_frequency_table_target(policy, table, new_freq)) {
-		target = table[index].frequency;
-		if (target == old_freq) {
-			if (new_freq > old_freq) {
-				int tmp_index;
-				if (!cpufreq_frequency_table_target(policy, table, new_freq + 1, &tmp_index))
-					target = table[tmp_index].frequency;
-			} else if (new_freq < old_freq) {
-				int tmp_index;
-				if (!cpufreq_frequency_table_target(policy, table, new_freq - 1, &tmp_index))
-					target = table[tmp_index].frequency;
-			}
-		}
-
-		if (target == old_freq)
-			return;
-	} else {
-		dprintk(SMARTMAX_EPS_DEBUG_ALG, "frequency change failed\n");
-		return;
-	}
-
-	dprintk(SMARTMAX_EPS_DEBUG_JUMPS, "%d: jumping to %d (%d) cpu %d\n",
-		old_freq, new_freq, target, cpu);
-
-	__cpufreq_driver_target(policy, target, prefered_relation);
-
-	// remember last time we changed frequency
-	this_smartmax_eps->freq_change_time = ktime_to_us(ktime_get());
+index = -1;
+index = cpufreq_frequency_table_target(policy, table, new_freq);
+if (index < 0) {
+    target = new_freq;
+} else {
+    target = table[index].frequency;
 }
+
+if (target == old_freq) {
+    if (new_freq > old_freq) {
+        index = cpufreq_frequency_table_target(policy, table, new_freq + 1);
+        if (index >= 0)
+            target = table[index].frequency;
+    } else if (new_freq < old_freq) {
+        index = cpufreq_frequency_table_target(policy, table, new_freq - 1);
+        if (index >= 0)
+            target = table[index].frequency;
+    }
+}
+
+if (target == old_freq)
+    return;
+
+dprintk(SMARTMAX_EPS_DEBUG_JUMPS, "%d: jumping to %d (%d) cpu %d\n",
+    old_freq, new_freq, target, cpu);
+
+__cpufreq_driver_target(policy, target, prefered_relation);
+
+// remember last time we changed frequency
+this_smartmax_eps->freq_change_time = ktime_to_us(ktime_get());
 
 /* We use the same work function to sale up and down */
 static void cpufreq_smartmax_eps_freq_change(struct smartmax_eps_info_s *this_smartmax_eps) {
