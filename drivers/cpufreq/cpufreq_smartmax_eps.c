@@ -377,7 +377,7 @@ static inline void dbs_timer_exit(struct smartmax_eps_info_s *this_smartmax_eps)
 inline static void target_freq(struct cpufreq_policy *policy,
 		struct smartmax_eps_info_s *this_smartmax_eps, int new_freq, int old_freq,
 		int prefered_relation) {
-	int index, target;
+	int target;
 	struct cpufreq_frequency_table *table = this_smartmax_eps->freq_table;
 	unsigned int cpu = this_smartmax_eps->cpu;
 
@@ -386,34 +386,29 @@ inline static void target_freq(struct cpufreq_policy *policy,
 	// apply policy limits - just to be sure
 	new_freq = validate_freq(policy, new_freq);
 
-	if (!cpufreq_frequency_table_target(policy, table, new_freq, &index)) {
-		target = table[index].frequency;
-		if (target == old_freq) {
-			// if ramping up to *at most* current + ramp_up_step
-			// but no frequency higher than current, try also
-			// ramp up to *at least* current + ramp_up_step.
-			if (new_freq > old_freq) {
-				int tmp_index;
-				if (!cpufreq_frequency_table_target(policy, table, new_freq + 1, &tmp_index))
-					target = table[tmp_index].frequency;
-			}
-			// similarly for ramping down:
-			else if (new_freq < old_freq) {
-				int tmp_index;
-				if (!cpufreq_frequency_table_target(policy, table, new_freq - 1, &tmp_index))
-					target = table[tmp_index].frequency;
-			}
-		}
-
-		// no change
-		if (target == old_freq)
-			return;
-	} else {
+	target = cpufreq_frequency_table_target(policy, table, new_freq);
+	if (!target) {
 		dprintk(SMARTMAX_EPS_DEBUG_ALG, "frequency change failed\n");
 		return;
 	}
 
-	dprintk(SMARTMAX_EPS_DEBUG_JUMPS, "%d: jumping to %d (%d) cpu %d\n", old_freq, new_freq, target, cpu);
+	if (target == old_freq) {
+		if (new_freq > old_freq) {
+			int tmp_target = cpufreq_frequency_table_target(policy, table, new_freq + 1);
+			if (tmp_target)
+				target = tmp_target;
+		} else if (new_freq < old_freq) {
+			int tmp_target = cpufreq_frequency_table_target(policy, table, new_freq - 1);
+			if (tmp_target)
+				target = tmp_target;
+		}
+
+		if (target == old_freq)
+			return;
+	}
+
+	dprintk(SMARTMAX_EPS_DEBUG_JUMPS, "%d: jumping to %d (%d) cpu %d\n",
+		old_freq, new_freq, target, cpu);
 
 	__cpufreq_driver_target(policy, target, prefered_relation);
 }
