@@ -39,6 +39,7 @@
 #include <linux/input.h>
 #include <linux/kthread.h>
 #include <linux/slab.h>
+#include <linux/sched/task.h>
 #include <linux/kernel_stat.h>
 u64 get_cpu_idle_time(unsigned int cpu, u64 *wall, int io_busy);
 #ifdef CONFIG_CPU_FREQ_GOV_SMARTMAX_EPS_TEGRA
