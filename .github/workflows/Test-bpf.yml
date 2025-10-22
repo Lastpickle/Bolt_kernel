@@ -1,125 +1,118 @@
-name: Merge Phoenix Kernel Branch (Dry Run)
+name: Merge Phoenix Kernel Branch
 
 on:
-  workflow_dispatch:
+  workflow_dispatch:  # Manual trigger
     inputs:
       target_branch:
-        description: 'Target branch to test merge into'
+        description: 'Target branch to merge into'
         required: true
         default: 'Test-uv'
+      dry_run:
+        description: 'Dry run (no actual merge/push)'
+        required: true
+        type: boolean
+        default: true
   schedule:
-    - cron: '0 0 * * 0'  # Weekly on Sunday at midnight
+    - cron: '0 0 * * 0'  # Weekly on Sunday at midnight (optional)
 
 jobs:
   merge:
     runs-on: ubuntu-latest
-
+    
     steps:
       - name: Checkout repository
         uses: actions/checkout@v4
         with:
-          fetch-depth: 0
+          fetch-depth: 0  # Fetch all history for all branches
           token: ${{ secrets.GITHUB_TOKEN }}
-
+      
       - name: Configure Git
         run: |
           git config user.name "github-actions[bot]"
           git config user.email "github-actions[bot]@users.noreply.github.com"
-
+      
       - name: Add Phoenix Kernel remote
         run: |
           git remote add phoenix https://github.com/PhoenixKernel/linux.git
           git fetch phoenix
-
+      
       - name: Checkout target branch
         run: |
-          TARGET_BRANCH="${{ github.event.inputs.target_branch || 'Test-uv' }}"
-          git checkout "$TARGET_BRANCH"
-
-      - name: Dry-run merge Phoenix Kernel commit
-        id: dry_merge
+          git checkout ${{ github.event.inputs.target_branch || 'main' }}
+      
+      - name: Dry run - Show what will be merged
+        if: github.event.inputs.dry_run == 'true'
         run: |
-          echo "::notice::Performing dry-run merge..."
-          if git merge --no-commit --no-ff b24d1ae9ccbf3ebe6f4baa50d2d48c03be02bc17; then
-            echo "::notice::Dry-run merge succeeded with no conflicts."
-            echo "has_conflicts=false" >> $GITHUB_OUTPUT
-          else
-            echo "::warning::Merge conflicts detected during dry run!"
+          echo "::notice::DRY RUN MODE - No changes will be committed or pushed"
+          echo "=========================================="
+          echo "Target branch: ${{ github.event.inputs.target_branch || 'main' }}"
+          echo "Source commit: b24d1ae9ccbf3ebe6f4baa50d2d48c03be02bc17"
+          echo "=========================================="
+          echo ""
+          echo "Commits to be merged:"
+          git log HEAD..b24d1ae9ccbf3ebe6f4baa50d2d48c03be02bc17 --oneline --graph
+          echo ""
+          echo "Files that will be changed:"
+          git diff --stat HEAD...b24d1ae9ccbf3ebe6f4baa50d2d48c03be02bc17
+          echo ""
+          echo "Attempting test merge (will be aborted)..."
+          git merge --no-commit --no-ff b24d1ae9ccbf3ebe6f4baa50d2d48c03be02bc17 || true
+      
+      - name: Check for potential conflicts (dry run)
+        if: github.event.inputs.dry_run == 'true'
+        id: dry_check_conflicts
+        run: |
+          if git diff --name-only --diff-filter=U | grep -q .; then
+            echo "::warning::Merge would have conflicts!"
+            echo "Conflicting files:"
             git diff --name-only --diff-filter=U
             echo "has_conflicts=true" >> $GITHUB_OUTPUT
-          fi
-
-      - name: Abort merge to reset state
-        run: |
-          git merge --abort || true
-          echo "::notice::Merge aborted (dry run complete)."
-
-      - name: Summary
-        run: |
-          if [ "${{ steps.dry_merge.outputs.has_conflicts }}" = "true" ]; then
-            echo "::error::Conflicts detected during dry run merge."
           else
-            echo "::notice::No conflicts detected during dry run merge."
-           finame: Merge Phoenix Kernel Branch (Dry Run)
-
-on:
-  workflow_dispatch:
-    inputs:
-      target_branch:
-        description: 'Target branch to test merge into'
-        required: true
-        default: 'Test-uv'
-  schedule:
-    - cron: '0 0 * * 0'  # Weekly on Sunday at midnight
-
-jobs:
-  merge:
-    runs-on: ubuntu-latest
-
-    steps:
-      - name: Checkout repository
-        uses: actions/checkout@v4
+            echo "::notice::No conflicts detected - merge would succeed!"
+            echo "has_conflicts=false" >> $GITHUB_OUTPUT
+          fi
+          git merge --abort || true
+      
+      - name: Dry run summary
+        if: github.event.inputs.dry_run == 'true'
+        run: |
+          echo "::notice::Dry run complete. Set 'dry_run' to 'false' to perform actual merge."
+      
+      - name: Merge Phoenix Kernel commit
+        if: github.event.inputs.dry_run == 'false'
+        run: |
+          git merge b24d1ae9ccbf3ebe6f4baa50d2d48c03be02bc17 --no-ff -m "Merge Phoenix Kernel changes from b24d1ae9ccbf"
+        continue-on-error: true
+      
+      - name: Check for merge conflicts
+        if: github.event.inputs.dry_run == 'false'
+        id: check_conflicts
+        run: |
+          if git diff --name-only --diff-filter=U | grep -q .; then
+            echo "has_conflicts=true" >> $GITHUB_OUTPUT
+            echo "::warning::Merge conflicts detected!"
+            git diff --name-only --diff-filter=U
+            exit 1
+          else
+            echo "has_conflicts=false" >> $GITHUB_OUTPUT
+          fi
+      
+      - name: Push changes
+        if: github.event.inputs.dry_run == 'false' && steps.check_conflicts.outputs.has_conflicts == 'false'
+        run: |
+          git push origin ${{ github.event.inputs.target_branch || 'main' }}
+      
+      - name: Create issue on conflict
+        if: github.event.inputs.dry_run == 'false' && failure() && steps.check_conflicts.outputs.has_conflicts == 'true'
+        uses: actions/github-script@v7
         with:
-          fetch-depth: 0
-          token: ${{ secrets.GITHUB_TOKEN }}
-
-      - name: Configure Git
-        run: |
-          git config user.name "github-actions[bot]"
-          git config user.email "github-actions[bot]@users.noreply.github.com"
-
-      - name: Add Phoenix Kernel remote
-        run: |
-          git remote add phoenix https://github.com/PhoenixKernel/linux.git
-          git fetch phoenix
-
-      - name: Checkout target branch
-        run: |
-          TARGET_BRANCH="${{ github.event.inputs.target_branch || 'Test-uv' }}"
-          git checkout "$TARGET_BRANCH"
-
-      - name: Dry-run merge Phoenix Kernel commit
-        id: dry_merge
-        run: |
-          echo "::notice::Performing dry-run merge..."
-          if git merge --no-commit --no-ff b24d1ae9ccbf3ebe6f4baa50d2d48c03be02bc17; then
-            echo "::notice::Dry-run merge succeeded with no conflicts."
-            echo "has_conflicts=false" >> $GITHUB_OUTPUT
-          else
-            echo "::warning::Merge conflicts detected during dry run!"
-            git diff --name-only --diff-filter=U
-            echo "has_conflicts=true" >> $GITHUB_OUTPUT
-          fi
-
-      - name: Abort merge to reset state
-        run: |
-          git merge --abort || true
-          echo "::notice::Merge aborted (dry run complete)."
-
-      - name: Summary
-        run: |
-          if [ "${{ steps.dry_merge.outputs.has_conflicts }}" = "true" ]; then
-            echo "::error::Conflicts detected during dry run merge."
-          else
-            echo "::notice::No conflicts detected during dry run merge."
-          fi
+          script: |
+            github.rest.issues.create({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              title: 'Merge Conflict: Phoenix Kernel Integration',
+              body: 'Automatic merge from Phoenix Kernel commit b24d1ae9ccbf failed due to conflicts. Manual resolution required.\n\nConflicting files:\n```\n' + process.env.CONFLICTS + '\n```',
+              labels: ['merge-conflict', 'needs-attention']
+            })
+        env:
+          CONFLICTS: ${{ steps.check_conflicts.outputs.conflicts }}
