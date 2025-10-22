@@ -12,6 +12,10 @@ on:
         required: true
         type: boolean
         default: true
+      cutoff_date:
+        description: 'Only merge commits after this date (YYYY-MM-DD)'
+        required: true
+        default: '2024-12-28'
   schedule:
     - cron: '0 0 * * 0'  # Weekly on Sunday at midnight (optional)
 
@@ -40,23 +44,51 @@ jobs:
         run: |
           git checkout ${{ github.event.inputs.target_branch || 'main' }}
       
+      - name: Find commits since cutoff date
+        id: find_commits
+        run: |
+          echo "Finding commits from b24d1ae9ccbf since ${{ github.event.inputs.cutoff_date || '2024-12-28' }}..."
+          
+          # Get all commits from the Phoenix branch since the cutoff date
+          COMMITS=$(git log --since="${{ github.event.inputs.cutoff_date || '2024-12-28' }} 00:00:00" \
+                    --until="2024-12-29 00:00:00" \
+                    --reverse --format="%H" \
+                    b24d1ae9ccbf3ebe6f4baa50d2d48c03be02bc17)
+          
+          if [ -z "$COMMITS" ]; then
+            echo "::error::No commits found on December 28, 2024"
+            exit 1
+          fi
+          
+          echo "Commits to merge:"
+          echo "$COMMITS"
+          
+          # Get the last commit from Dec 28
+          LAST_COMMIT=$(echo "$COMMITS" | tail -n 1)
+          echo "last_commit=$LAST_COMMIT" >> $GITHUB_OUTPUT
+          echo "::notice::Will merge up to commit: $LAST_COMMIT"
+      
       - name: Dry run - Show what will be merged
         if: github.event.inputs.dry_run == 'true'
         run: |
           echo "::notice::DRY RUN MODE - No changes will be committed or pushed"
           echo "=========================================="
           echo "Target branch: ${{ github.event.inputs.target_branch || 'main' }}"
-          echo "Source commit: b24d1ae9ccbf3ebe6f4baa50d2d48c03be02bc17"
+          echo "Source commit: ${{ steps.find_commits.outputs.last_commit }}"
+          echo "Cutoff date: ${{ github.event.inputs.cutoff_date || '2024-12-28' }}"
           echo "=========================================="
           echo ""
-          echo "Commits to be merged:"
-          git log HEAD..b24d1ae9ccbf3ebe6f4baa50d2d48c03be02bc17 --oneline --graph
+          echo "Commits from December 28, 2024 to be merged:"
+          git log --since="${{ github.event.inputs.cutoff_date || '2024-12-28' }} 00:00:00" \
+                  --until="2024-12-29 00:00:00" \
+                  --oneline --graph \
+                  b24d1ae9ccbf3ebe6f4baa50d2d48c03be02bc17
           echo ""
           echo "Files that will be changed:"
-          git diff --stat HEAD...b24d1ae9ccbf3ebe6f4baa50d2d48c03be02bc17
+          git diff --stat HEAD...${{ steps.find_commits.outputs.last_commit }}
           echo ""
           echo "Attempting test merge (will be aborted)..."
-          git merge --no-commit --no-ff b24d1ae9ccbf3ebe6f4baa50d2d48c03be02bc17 || true
+          git merge --no-commit --no-ff ${{ steps.find_commits.outputs.last_commit }} || true
       
       - name: Check for potential conflicts (dry run)
         if: github.event.inputs.dry_run == 'true'
@@ -81,7 +113,7 @@ jobs:
       - name: Merge Phoenix Kernel commit
         if: github.event.inputs.dry_run == 'false'
         run: |
-          git merge b24d1ae9ccbf3ebe6f4baa50d2d48c03be02bc17 --no-ff -m "Merge Phoenix Kernel changes from b24d1ae9ccbf"
+          git merge ${{ steps.find_commits.outputs.last_commit }} --no-ff -m "Merge Phoenix Kernel changes from Dec 28, 2024 (up to ${{ steps.find_commits.outputs.last_commit }})"
         continue-on-error: true
       
       - name: Check for merge conflicts
