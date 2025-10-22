@@ -1,0 +1,125 @@
+name: Merge Phoenix Kernel Branch (Dry Run)
+
+on:
+  workflow_dispatch:
+    inputs:
+      target_branch:
+        description: 'Target branch to test merge into'
+        required: true
+        default: 'Test-uv'
+  schedule:
+    - cron: '0 0 * * 0'  # Weekly on Sunday at midnight
+
+jobs:
+  merge:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+          token: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Configure Git
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+
+      - name: Add Phoenix Kernel remote
+        run: |
+          git remote add phoenix https://github.com/PhoenixKernel/linux.git
+          git fetch phoenix
+
+      - name: Checkout target branch
+        run: |
+          TARGET_BRANCH="${{ github.event.inputs.target_branch || 'Test-uv' }}"
+          git checkout "$TARGET_BRANCH"
+
+      - name: Dry-run merge Phoenix Kernel commit
+        id: dry_merge
+        run: |
+          echo "::notice::Performing dry-run merge..."
+          if git merge --no-commit --no-ff b24d1ae9ccbf3ebe6f4baa50d2d48c03be02bc17; then
+            echo "::notice::Dry-run merge succeeded with no conflicts."
+            echo "has_conflicts=false" >> $GITHUB_OUTPUT
+          else
+            echo "::warning::Merge conflicts detected during dry run!"
+            git diff --name-only --diff-filter=U
+            echo "has_conflicts=true" >> $GITHUB_OUTPUT
+          fi
+
+      - name: Abort merge to reset state
+        run: |
+          git merge --abort || true
+          echo "::notice::Merge aborted (dry run complete)."
+
+      - name: Summary
+        run: |
+          if [ "${{ steps.dry_merge.outputs.has_conflicts }}" = "true" ]; then
+            echo "::error::Conflicts detected during dry run merge."
+          else
+            echo "::notice::No conflicts detected during dry run merge."
+           finame: Merge Phoenix Kernel Branch (Dry Run)
+
+on:
+  workflow_dispatch:
+    inputs:
+      target_branch:
+        description: 'Target branch to test merge into'
+        required: true
+        default: 'Test-uv'
+  schedule:
+    - cron: '0 0 * * 0'  # Weekly on Sunday at midnight
+
+jobs:
+  merge:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+          token: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Configure Git
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+
+      - name: Add Phoenix Kernel remote
+        run: |
+          git remote add phoenix https://github.com/PhoenixKernel/linux.git
+          git fetch phoenix
+
+      - name: Checkout target branch
+        run: |
+          TARGET_BRANCH="${{ github.event.inputs.target_branch || 'Test-uv' }}"
+          git checkout "$TARGET_BRANCH"
+
+      - name: Dry-run merge Phoenix Kernel commit
+        id: dry_merge
+        run: |
+          echo "::notice::Performing dry-run merge..."
+          if git merge --no-commit --no-ff b24d1ae9ccbf3ebe6f4baa50d2d48c03be02bc17; then
+            echo "::notice::Dry-run merge succeeded with no conflicts."
+            echo "has_conflicts=false" >> $GITHUB_OUTPUT
+          else
+            echo "::warning::Merge conflicts detected during dry run!"
+            git diff --name-only --diff-filter=U
+            echo "has_conflicts=true" >> $GITHUB_OUTPUT
+          fi
+
+      - name: Abort merge to reset state
+        run: |
+          git merge --abort || true
+          echo "::notice::Merge aborted (dry run complete)."
+
+      - name: Summary
+        run: |
+          if [ "${{ steps.dry_merge.outputs.has_conflicts }}" = "true" ]; then
+            echo "::error::Conflicts detected during dry run merge."
+          else
+            echo "::notice::No conflicts detected during dry run merge."
+          fi
