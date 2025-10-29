@@ -1,0 +1,288 @@
+name: Cherry-pick Kernel Commits
+
+on:
+  workflow_dispatch:
+    inputs:
+      target_branch:
+        description: 'Target branch to apply changes to'
+        required: true
+        default: 'Test-uv'
+      source_repo:
+        description: 'Source repository URL (e.g., https://github.com/user/repo.git)'
+        required: true
+      commit_hashes:
+        description: 'Commit hashes to cherry-pick (comma or space separated)'
+        required: true
+      dry_run:
+        description: 'Dry run (no actual changes)'
+        required: true
+        type: boolean
+        default: true
+      conflict_strategy:
+        description: 'How to handle conflicts'
+        required: true
+        type: choice
+        options:
+          - 'stop-on-conflict'
+          - 'skip-conflicts'
+          - 'use-theirs'
+        default: 'stop-on-conflict'
+
+jobs:
+  cherry-pick:
+    runs-on: ubuntu-latest
+    
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+          token: ${{ secrets.GITHUB_TOKEN }}
+      
+      - name: Configure Git
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+      
+      - name: Add source repository
+        run: |
+          git remote add source-kernel ${{ github.event.inputs.source_repo }}
+          git fetch source-kernel
+      
+      - name: Checkout target branch
+        run: |
+          git checkout ${{ github.event.inputs.target_branch }}
+      
+      - name: Parse commit hashes
+        id: parse_commits
+        run: |
+          # Parse comma or space separated commits
+          COMMITS="${{ github.event.inputs.commit_hashes }}"
+          COMMITS=$(echo "$COMMITS" | tr ',' ' ' | tr -s ' ')
+          
+          echo "Parsed commits:"
+          echo "$COMMITS"
+          
+          # Save to file
+          echo "$COMMITS" | tr ' ' '\n' > /tmp/commits.txt
+          
+          COUNT=$(wc -l < /tmp/commits.txt)
+          echo "commit_count=$COUNT" >> $GITHUB_OUTPUT
+          echo "::notice::Will process $COUNT commits"
+      
+      - name: Dry run - Test cherry-pick
+        if: github.event.inputs.dry_run == 'true'
+        run: |
+          echo "=========================================="
+          echo "DRY RUN MODE - No changes will be pushed"
+          echo "=========================================="
+          echo "Source repo: ${{ github.event.inputs.source_repo }}"
+          echo "Target branch: ${{ github.event.inputs.target_branch }}"
+          echo "Commits to process: ${{ steps.parse_commits.outputs.commit_count }}"
+          echo "Conflict strategy: ${{ github.event.inputs.conflict_strategy }}"
+          echo "=========================================="
+          echo ""
+          
+          COUNTER=1
+          SUCCESS=0
+          CONFLICTS=0
+          INVALID=0
+          
+          while IFS= read -r commit; do
+            # Skip empty lines
+            [ -z "$commit" ] && continue
+            
+            echo "----------------------------------------"
+            echo "[$COUNTER/${{ steps.parse_commits.outputs.commit_count }}] Testing: $commit"
+            
+            # Check if commit exists
+            if ! git cat-file -e $commit^{commit} 2>/dev/null; then
+              echo "✗ Invalid commit hash"
+              INVALID=$((INVALID + 1))
+              COUNTER=$((COUNTER + 1))
+              continue
+            fi
+            
+            # Show commit info
+            git log -1 --oneline $commit
+            echo ""
+            
+            # Test cherry-pick
+            if git cherry-pick --no-commit $commit 2>/dev/null; then
+              echo "✓ Would apply cleanly"
+              echo ""
+              echo "Files changed:"
+              git diff --stat HEAD | head -20
+              
+              # Show more if there are many files
+              FILE_COUNT=$(git diff --name-only HEAD | wc -l)
+              if [ $FILE_COUNT -gt 20 ]; then
+                echo "... and $((FILE_COUNT - 20)) more files"
+              fi
+              
+              SUCCESS=$((SUCCESS + 1))
+              git reset --hard HEAD
+            else
+              echo "✗ Would have conflicts"
+              echo ""
+              echo "Conflicting files:"
+              git diff --name-only --diff-filter=U | sed 's/^/  - /'
+              CONFLICTS=$((CONFLICTS + 1))
+              git cherry-pick --abort 2>/dev/null || true
+            fi
+            
+            echo ""
+            COUNTER=$((COUNTER + 1))
+          done < /tmp/commits.txt
+          
+          echo "=========================================="
+          echo "Dry Run Summary:"
+          echo "  Clean commits: $SUCCESS"
+          echo "  Conflicting commits: $CONFLICTS"
+          echo "  Invalid commits: $INVALID"
+          echo "=========================================="
+          
+          if [ $CONFLICTS -gt 0 ]; then
+            echo "::warning::$CONFLICTS commits would have conflicts"
+            echo "::notice::Run with 'skip-conflicts' to apply only clean commits"
+          fi
+          
+          if [ $INVALID -gt 0 ]; then
+            echo "::error::$INVALID invalid commit hashes found"
+          fi
+      
+      - name: Cherry-pick commits
+        if: github.event.inputs.dry_run == 'false'
+        id: cherry_pick
+        run: |
+          COUNTER=1
+          SUCCESS=0
+          CONFLICTS=0
+          SKIPPED=0
+          INVALID=0
+          CONFLICT_COMMITS=""
+          APPLIED_COMMITS=""
+          
+          while IFS= read -r commit; do
+            # Skip empty lines
+            [ -z "$commit" ] && continue
+            
+            echo "=========================================="
+            echo "[$COUNTER/${{ steps.parse_commits.outputs.commit_count }}] Cherry-picking: $commit"
+            
+            # Check if commit exists
+            if ! git cat-file -e $commit^{commit} 2>/dev/null; then
+              echo "✗ Invalid commit hash"
+              INVALID=$((INVALID + 1))
+              COUNTER=$((COUNTER + 1))
+              continue
+            fi
+            
+            git log -1 --oneline $commit
+            echo ""
+            
+            if git cherry-pick $commit; then
+              echo "✓ Applied successfully"
+              SUCCESS=$((SUCCESS + 1))
+              APPLIED_COMMITS="$APPLIED_COMMITS$commit "
+            else
+              CONFLICTS=$((CONFLICTS + 1))
+              CONFLICT_COMMITS="$CONFLICT_COMMITS$commit "
+              
+              case "${{ github.event.inputs.conflict_strategy }}" in
+                "skip-conflicts")
+                  echo "⊘ Skipping due to conflicts"
+                  git cherry-pick --abort
+                  SKIPPED=$((SKIPPED + 1))
+                  ;;
+                "use-theirs")
+                  echo "→ Accepting their changes for conflicts"
+                  git checkout --theirs .
+                  git add .
+                  git cherry-pick --continue --no-edit
+                  SUCCESS=$((SUCCESS + 1))
+                  ;;
+                *)
+                  echo "::error::Cherry-pick stopped due to conflicts in commit $commit"
+                  echo "Conflicting files:"
+                  git diff --name-only --diff-filter=U
+                  git cherry-pick --abort
+                  exit 1
+                  ;;
+              esac
+            fi
+            
+            echo ""
+            COUNTER=$((COUNTER + 1))
+          done < /tmp/commits.txt
+          
+          echo "success_count=$SUCCESS" >> $GITHUB_OUTPUT
+          echo "conflict_count=$CONFLICTS" >> $GITHUB_OUTPUT
+          echo "skipped_count=$SKIPPED" >> $GITHUB_OUTPUT
+          echo "invalid_count=$INVALID" >> $GITHUB_OUTPUT
+          echo "conflict_commits=$CONFLICT_COMMITS" >> $GITHUB_OUTPUT
+          echo "applied_commits=$APPLIED_COMMITS" >> $GITHUB_OUTPUT
+      
+      - name: Push changes
+        if: github.event.inputs.dry_run == 'false' && steps.cherry_pick.outputs.success_count != '0'
+        run: |
+          if git diff --quiet origin/${{ github.event.inputs.target_branch }}; then
+            echo "::notice::No changes to push"
+          else
+            git push origin ${{ github.event.inputs.target_branch }}
+            echo "::notice::Successfully pushed changes"
+          fi
+      
+      - name: Final summary
+        if: github.event.inputs.dry_run == 'false'
+        run: |
+          echo "=========================================="
+          echo "Cherry-pick Complete!"
+          echo "=========================================="
+          echo "Successfully applied: ${{ steps.cherry_pick.outputs.success_count }}"
+          echo "Conflicts encountered: ${{ steps.cherry_pick.outputs.conflict_count }}"
+          echo "Skipped: ${{ steps.cherry_pick.outputs.skipped_count }}"
+          echo "Invalid commits: ${{ steps.cherry_pick.outputs.invalid_count }}"
+          echo "=========================================="
+          
+          if [ "${{ steps.cherry_pick.outputs.success_count }}" != "0" ]; then
+            echo "Applied commits:"
+            echo "${{ steps.cherry_pick.outputs.applied_commits }}" | tr ' ' '\n'
+          fi
+          
+          if [ "${{ steps.cherry_pick.outputs.conflict_count }}" != "0" ]; then
+            echo ""
+            echo "Problematic commits:"
+            echo "${{ steps.cherry_pick.outputs.conflict_commits }}" | tr ' ' '\n'
+          fi
+      
+      - name: Create summary issue
+        if: github.event.inputs.dry_run == 'false' && (steps.cherry_pick.outputs.conflict_count != '0' || steps.cherry_pick.outputs.invalid_count != '0')
+        uses: actions/github-script@v7
+        with:
+          script: |
+            const body = `## Cherry-pick Summary
+            
+            **Source:** ${{ github.event.inputs.source_repo }}
+            **Target branch:** ${{ github.event.inputs.target_branch }}
+            **Strategy:** ${{ github.event.inputs.conflict_strategy }}
+            
+            ### Results
+            - ✅ Successfully applied: ${{ steps.cherry_pick.outputs.success_count }}
+            - ⚠️ Conflicts: ${{ steps.cherry_pick.outputs.conflict_count }}
+            - ⊘ Skipped: ${{ steps.cherry_pick.outputs.skipped_count }}
+            - ❌ Invalid: ${{ steps.cherry_pick.outputs.invalid_count }}
+            
+            ${steps.cherry_pick.outputs.conflict_count !== '0' ? `### Conflicting Commits\n\`\`\`\n${{ steps.cherry_pick.outputs.conflict_commits }}\n\`\`\`` : ''}
+            
+            ${steps.cherry_pick.outputs.applied_count !== '0' ? `### Applied Commits\n\`\`\`\n${{ steps.cherry_pick.outputs.applied_commits }}\n\`\`\`` : ''}
+            
+            Manual review may be required.`;
+            
+            github.rest.issues.create({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              title: 'Cherry-pick Summary: ' + new Date().toISOString().split('T')[0],
+              body: body,
+              labels: ['cherry-pick', 'kernel-update']
+            });
