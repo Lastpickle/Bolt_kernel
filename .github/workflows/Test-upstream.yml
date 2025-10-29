@@ -1,35 +1,45 @@
-name: Cherry-pick Kernel Commits
+name: Apply Kernel Patches
 
 on:
   workflow_dispatch:
     inputs:
       target_branch:
-        description: 'Target branch to apply changes to'
+        description: 'Target branch to apply patches to'
         required: true
-        default: 'Test-uv'
+        default: 'main'
       source_repo:
-        description: 'Source repository URL (e.g., https://github.com/user/repo.git)'
+        description: 'Source repository URL (e.g., https://github.com/user/repo)'
         required: true
       commit_hashes:
-        description: 'Commit hashes to cherry-pick (comma or space separated)'
+        description: 'Commit hashes to apply as patches (comma or space separated)'
         required: true
       dry_run:
         description: 'Dry run (no actual changes)'
         required: true
         type: boolean
         default: true
-      conflict_strategy:
-        description: 'How to handle conflicts'
+      fuzz_factor:
+        description: 'Patch fuzz factor (0-3, higher = more tolerant)'
         required: true
         type: choice
         options:
-          - 'stop-on-conflict'
-          - 'skip-conflicts'
-          - 'use-theirs'
-        default: 'stop-on-conflict'
+          - '0'
+          - '1'
+          - '2'
+          - '3'
+        default: '3'
+      reject_strategy:
+        description: 'What to do with rejected hunks'
+        required: true
+        type: choice
+        options:
+          - 'stop-on-reject'
+          - 'continue-with-rejects'
+          - 'skip-failed-patches'
+        default: 'stop-on-reject'
 
 jobs:
-  cherry-pick:
+  apply-patches:
     runs-on: ubuntu-latest
     
     steps:
@@ -44,187 +54,224 @@ jobs:
           git config user.name "github-actions[bot]"
           git config user.email "github-actions[bot]@users.noreply.github.com"
       
-      - name: Add source repository
-        run: |
-          git remote add source-kernel ${{ github.event.inputs.source_repo }}
-          git fetch source-kernel
-      
       - name: Checkout target branch
         run: |
           git checkout ${{ github.event.inputs.target_branch }}
       
-      - name: Parse commit hashes
-        id: parse_commits
+      - name: Parse commit hashes and download patches
+        id: download_patches
         run: |
           # Parse comma or space separated commits
           COMMITS="${{ github.event.inputs.commit_hashes }}"
           COMMITS=$(echo "$COMMITS" | tr ',' ' ' | tr -s ' ')
           
-          echo "Parsed commits:"
-          echo "$COMMITS"
+          # Clean repo URL (remove .git suffix if present)
+          REPO_URL="${{ github.event.inputs.source_repo }}"
+          REPO_URL="${REPO_URL%.git}"
           
-          # Save to file
-          echo "$COMMITS" | tr ' ' '\n' > /tmp/commits.txt
+          echo "Source repository: $REPO_URL"
+          echo "Commits to process: $COMMITS"
+          echo ""
           
-          COUNT=$(wc -l < /tmp/commits.txt)
-          echo "commit_count=$COUNT" >> $GITHUB_OUTPUT
-          echo "::notice::Will process $COUNT commits"
+          mkdir -p /tmp/patches
+          COUNTER=1
+          SUCCESS=0
+          FAILED=0
+          
+          for commit in $COMMITS; do
+            echo "[$COUNTER] Downloading patch for commit: $commit"
+            PATCH_URL="${REPO_URL}/commit/${commit}.patch"
+            PATCH_FILE="/tmp/patches/${COUNTER}_${commit}.patch"
+            
+            if curl -f -L -s "$PATCH_URL" -o "$PATCH_FILE"; then
+              echo "✓ Downloaded: $PATCH_URL"
+              
+              # Show patch info
+              echo "Patch subject:"
+              head -n 20 "$PATCH_FILE" | grep -E "^(Subject|From|Date):" || true
+              
+              SUCCESS=$((SUCCESS + 1))
+            else
+              echo "✗ Failed to download: $PATCH_URL"
+              FAILED=$((FAILED + 1))
+            fi
+            
+            echo ""
+            COUNTER=$((COUNTER + 1))
+          done
+          
+          echo "download_success=$SUCCESS" >> $GITHUB_OUTPUT
+          echo "download_failed=$FAILED" >> $GITHUB_OUTPUT
+          echo "::notice::Downloaded $SUCCESS patches, $FAILED failed"
+          
+          if [ $SUCCESS -eq 0 ]; then
+            echo "::error::No patches downloaded successfully"
+            exit 1
+          fi
       
-      - name: Dry run - Test cherry-pick
+      - name: Dry run - Test patch application
         if: github.event.inputs.dry_run == 'true'
         run: |
           echo "=========================================="
-          echo "DRY RUN MODE - No changes will be pushed"
+          echo "DRY RUN MODE - No changes will be committed"
           echo "=========================================="
-          echo "Source repo: ${{ github.event.inputs.source_repo }}"
           echo "Target branch: ${{ github.event.inputs.target_branch }}"
-          echo "Commits to process: ${{ steps.parse_commits.outputs.commit_count }}"
-          echo "Conflict strategy: ${{ github.event.inputs.conflict_strategy }}"
+          echo "Fuzz factor: ${{ github.event.inputs.fuzz_factor }}"
+          echo "Patches to apply: ${{ steps.download_patches.outputs.download_success }}"
           echo "=========================================="
           echo ""
           
-          COUNTER=1
           SUCCESS=0
-          CONFLICTS=0
-          INVALID=0
+          PARTIAL=0
+          FAILED=0
           
-          while IFS= read -r commit; do
-            # Skip empty lines
-            [ -z "$commit" ] && continue
+          for patch_file in /tmp/patches/*.patch; do
+            [ -f "$patch_file" ] || continue
             
+            PATCH_NAME=$(basename "$patch_file")
             echo "----------------------------------------"
-            echo "[$COUNTER/${{ steps.parse_commits.outputs.commit_count }}] Testing: $commit"
-            
-            # Check if commit exists
-            if ! git cat-file -e $commit^{commit} 2>/dev/null; then
-              echo "✗ Invalid commit hash"
-              INVALID=$((INVALID + 1))
-              COUNTER=$((COUNTER + 1))
-              continue
-            fi
-            
-            # Show commit info
-            git log -1 --oneline $commit
+            echo "Testing: $PATCH_NAME"
             echo ""
             
-            # Test cherry-pick
-            if git cherry-pick --no-commit $commit 2>/dev/null; then
+            # Try to apply patch with dry-run
+            if patch --dry-run -p1 -F ${{ github.event.inputs.fuzz_factor }} < "$patch_file" 2>&1 | tee /tmp/patch_output.txt; then
               echo "✓ Would apply cleanly"
-              echo ""
-              echo "Files changed:"
-              git diff --stat HEAD | head -20
               
-              # Show more if there are many files
-              FILE_COUNT=$(git diff --name-only HEAD | wc -l)
-              if [ $FILE_COUNT -gt 20 ]; then
-                echo "... and $((FILE_COUNT - 20)) more files"
-              fi
+              # Show what would change
+              echo ""
+              echo "Files that would be modified:"
+              grep -E "^patching file" /tmp/patch_output.txt | sed 's/patching file /  - /'
               
               SUCCESS=$((SUCCESS + 1))
-              git reset --hard HEAD
             else
-              echo "✗ Would have conflicts"
-              echo ""
-              echo "Conflicting files:"
-              git diff --name-only --diff-filter=U | sed 's/^/  - /'
-              CONFLICTS=$((CONFLICTS + 1))
-              git cherry-pick --abort 2>/dev/null || true
+              # Check if partially applied
+              if grep -q "Hunk.*succeeded" /tmp/patch_output.txt; then
+                echo "⚠ Would apply partially (some hunks would fail)"
+                echo ""
+                echo "Failed hunks:"
+                grep -E "Hunk.*FAILED" /tmp/patch_output.txt | sed 's/^/  /'
+                PARTIAL=$((PARTIAL + 1))
+              else
+                echo "✗ Would fail completely"
+                FAILED=$((FAILED + 1))
+              fi
+              
+              # Show rejected files
+              if grep -q "saving rejects to file" /tmp/patch_output.txt; then
+                echo ""
+                echo "Reject files that would be created:"
+                grep "saving rejects to file" /tmp/patch_output.txt | sed 's/^/  /'
+              fi
             fi
             
             echo ""
-            COUNTER=$((COUNTER + 1))
-          done < /tmp/commits.txt
+          done
           
           echo "=========================================="
           echo "Dry Run Summary:"
-          echo "  Clean commits: $SUCCESS"
-          echo "  Conflicting commits: $CONFLICTS"
-          echo "  Invalid commits: $INVALID"
+          echo "  Clean patches: $SUCCESS"
+          echo "  Partial patches: $PARTIAL"
+          echo "  Failed patches: $FAILED"
           echo "=========================================="
           
-          if [ $CONFLICTS -gt 0 ]; then
-            echo "::warning::$CONFLICTS commits would have conflicts"
-            echo "::notice::Run with 'skip-conflicts' to apply only clean commits"
+          if [ $PARTIAL -gt 0 ]; then
+            echo "::warning::$PARTIAL patches would apply partially"
           fi
           
-          if [ $INVALID -gt 0 ]; then
-            echo "::error::$INVALID invalid commit hashes found"
+          if [ $FAILED -gt 0 ]; then
+            echo "::warning::$FAILED patches would fail completely"
           fi
       
-      - name: Cherry-pick commits
+      - name: Apply patches
         if: github.event.inputs.dry_run == 'false'
-        id: cherry_pick
+        id: apply_patches
         run: |
-          COUNTER=1
           SUCCESS=0
-          CONFLICTS=0
-          SKIPPED=0
-          INVALID=0
-          CONFLICT_COMMITS=""
-          APPLIED_COMMITS=""
+          PARTIAL=0
+          FAILED=0
+          FAILED_PATCHES=""
+          PARTIAL_PATCHES=""
           
-          while IFS= read -r commit; do
-            # Skip empty lines
-            [ -z "$commit" ] && continue
+          for patch_file in /tmp/patches/*.patch; do
+            [ -f "$patch_file" ] || continue
             
+            PATCH_NAME=$(basename "$patch_file")
             echo "=========================================="
-            echo "[$COUNTER/${{ steps.parse_commits.outputs.commit_count }}] Cherry-picking: $commit"
-            
-            # Check if commit exists
-            if ! git cat-file -e $commit^{commit} 2>/dev/null; then
-              echo "✗ Invalid commit hash"
-              INVALID=$((INVALID + 1))
-              COUNTER=$((COUNTER + 1))
-              continue
-            fi
-            
-            git log -1 --oneline $commit
+            echo "Applying: $PATCH_NAME"
             echo ""
             
-            if git cherry-pick $commit; then
+            # Apply patch
+            if patch -p1 -F ${{ github.event.inputs.fuzz_factor }} < "$patch_file" 2>&1 | tee /tmp/patch_output.txt; then
               echo "✓ Applied successfully"
               SUCCESS=$((SUCCESS + 1))
-              APPLIED_COMMITS="$APPLIED_COMMITS$commit "
-            else
-              CONFLICTS=$((CONFLICTS + 1))
-              CONFLICT_COMMITS="$CONFLICT_COMMITS$commit "
               
-              case "${{ github.event.inputs.conflict_strategy }}" in
-                "skip-conflicts")
-                  echo "⊘ Skipping due to conflicts"
-                  git cherry-pick --abort
-                  SKIPPED=$((SKIPPED + 1))
-                  ;;
-                "use-theirs")
-                  echo "→ Accepting their changes for conflicts"
-                  git checkout --theirs .
-                  git add .
-                  git cherry-pick --continue --no-edit
-                  SUCCESS=$((SUCCESS + 1))
-                  ;;
-                *)
-                  echo "::error::Cherry-pick stopped due to conflicts in commit $commit"
-                  echo "Conflicting files:"
-                  git diff --name-only --diff-filter=U
-                  git cherry-pick --abort
+              # Commit the changes
+              COMMIT_HASH=$(echo "$PATCH_NAME" | grep -oE '[a-f0-9]{7,}')
+              git add -A
+              git commit -m "Apply patch from commit $COMMIT_HASH" || true
+              
+            else
+              # Check if partially applied
+              if grep -q "Hunk.*succeeded" /tmp/patch_output.txt; then
+                echo "⚠ Applied partially (some hunks failed)"
+                PARTIAL=$((PARTIAL + 1))
+                PARTIAL_PATCHES="$PARTIAL_PATCHES$PATCH_NAME "
+                
+                case "${{ github.event.inputs.reject_strategy }}" in
+                  "continue-with-rejects")
+                    echo "→ Continuing with reject files"
+                    git add -A
+                    git commit -m "Partial patch from $PATCH_NAME (with rejects)" || true
+                    ;;
+                  "skip-failed-patches")
+                    echo "⊘ Skipping this patch"
+                    git reset --hard HEAD
+                    ;;
+                  *)
+                    echo "::error::Patch failed, stopping"
+                    exit 1
+                    ;;
+                esac
+              else
+                echo "✗ Failed completely"
+                FAILED=$((FAILED + 1))
+                FAILED_PATCHES="$FAILED_PATCHES$PATCH_NAME "
+                
+                if [ "${{ github.event.inputs.reject_strategy }}" = "stop-on-reject" ]; then
+                  echo "::error::Patch failed, stopping"
                   exit 1
-                  ;;
-              esac
+                else
+                  echo "⊘ Skipping this patch"
+                fi
+              fi
             fi
             
             echo ""
-            COUNTER=$((COUNTER + 1))
-          done < /tmp/commits.txt
+          done
           
           echo "success_count=$SUCCESS" >> $GITHUB_OUTPUT
-          echo "conflict_count=$CONFLICTS" >> $GITHUB_OUTPUT
-          echo "skipped_count=$SKIPPED" >> $GITHUB_OUTPUT
-          echo "invalid_count=$INVALID" >> $GITHUB_OUTPUT
-          echo "conflict_commits=$CONFLICT_COMMITS" >> $GITHUB_OUTPUT
-          echo "applied_commits=$APPLIED_COMMITS" >> $GITHUB_OUTPUT
+          echo "partial_count=$PARTIAL" >> $GITHUB_OUTPUT
+          echo "failed_count=$FAILED" >> $GITHUB_OUTPUT
+          echo "failed_patches=$FAILED_PATCHES" >> $GITHUB_OUTPUT
+          echo "partial_patches=$PARTIAL_PATCHES" >> $GITHUB_OUTPUT
+      
+      - name: List reject files
+        if: github.event.inputs.dry_run == 'false' && github.event.inputs.reject_strategy == 'continue-with-rejects'
+        run: |
+          echo "Checking for reject files..."
+          if find . -name "*.rej" -type f | grep -q .; then
+            echo "::warning::Reject files found:"
+            find . -name "*.rej" -type f
+            
+            echo ""
+            echo "Reject files content:"
+            find . -name "*.rej" -type f -exec echo "--- {} ---" \; -exec cat {} \; -exec echo "" \;
+          else
+            echo "No reject files found"
+          fi
       
       - name: Push changes
-        if: github.event.inputs.dry_run == 'false' && steps.cherry_pick.outputs.success_count != '0'
+        if: github.event.inputs.dry_run == 'false' && steps.apply_patches.outputs.success_count != '0'
         run: |
           if git diff --quiet origin/${{ github.event.inputs.target_branch }}; then
             echo "::notice::No changes to push"
@@ -237,52 +284,52 @@ jobs:
         if: github.event.inputs.dry_run == 'false'
         run: |
           echo "=========================================="
-          echo "Cherry-pick Complete!"
+          echo "Patch Application Complete!"
           echo "=========================================="
-          echo "Successfully applied: ${{ steps.cherry_pick.outputs.success_count }}"
-          echo "Conflicts encountered: ${{ steps.cherry_pick.outputs.conflict_count }}"
-          echo "Skipped: ${{ steps.cherry_pick.outputs.skipped_count }}"
-          echo "Invalid commits: ${{ steps.cherry_pick.outputs.invalid_count }}"
+          echo "Successfully applied: ${{ steps.apply_patches.outputs.success_count }}"
+          echo "Partially applied: ${{ steps.apply_patches.outputs.partial_count }}"
+          echo "Failed: ${{ steps.apply_patches.outputs.failed_count }}"
           echo "=========================================="
           
-          if [ "${{ steps.cherry_pick.outputs.success_count }}" != "0" ]; then
-            echo "Applied commits:"
-            echo "${{ steps.cherry_pick.outputs.applied_commits }}" | tr ' ' '\n'
+          if [ "${{ steps.apply_patches.outputs.partial_count }}" != "0" ]; then
+            echo ""
+            echo "Partially applied patches:"
+            echo "${{ steps.apply_patches.outputs.partial_patches }}" | tr ' ' '\n'
           fi
           
-          if [ "${{ steps.cherry_pick.outputs.conflict_count }}" != "0" ]; then
+          if [ "${{ steps.apply_patches.outputs.failed_count }}" != "0" ]; then
             echo ""
-            echo "Problematic commits:"
-            echo "${{ steps.cherry_pick.outputs.conflict_commits }}" | tr ' ' '\n'
+            echo "Failed patches:"
+            echo "${{ steps.apply_patches.outputs.failed_patches }}" | tr ' ' '\n'
           fi
       
       - name: Create summary issue
-        if: github.event.inputs.dry_run == 'false' && (steps.cherry_pick.outputs.conflict_count != '0' || steps.cherry_pick.outputs.invalid_count != '0')
+        if: github.event.inputs.dry_run == 'false' && (steps.apply_patches.outputs.partial_count != '0' || steps.apply_patches.outputs.failed_count != '0')
         uses: actions/github-script@v7
         with:
           script: |
-            const body = `## Cherry-pick Summary
+            const body = `## Patch Application Summary
             
             **Source:** ${{ github.event.inputs.source_repo }}
             **Target branch:** ${{ github.event.inputs.target_branch }}
-            **Strategy:** ${{ github.event.inputs.conflict_strategy }}
+            **Fuzz factor:** ${{ github.event.inputs.fuzz_factor }}
+            **Reject strategy:** ${{ github.event.inputs.reject_strategy }}
             
             ### Results
-            - ✅ Successfully applied: ${{ steps.cherry_pick.outputs.success_count }}
-            - ⚠️ Conflicts: ${{ steps.cherry_pick.outputs.conflict_count }}
-            - ⊘ Skipped: ${{ steps.cherry_pick.outputs.skipped_count }}
-            - ❌ Invalid: ${{ steps.cherry_pick.outputs.invalid_count }}
+            - ✅ Successfully applied: ${{ steps.apply_patches.outputs.success_count }}
+            - ⚠️ Partially applied: ${{ steps.apply_patches.outputs.partial_count }}
+            - ❌ Failed: ${{ steps.apply_patches.outputs.failed_count }}
             
-            ${steps.cherry_pick.outputs.conflict_count !== '0' ? `### Conflicting Commits\n\`\`\`\n${{ steps.cherry_pick.outputs.conflict_commits }}\n\`\`\`` : ''}
+            ${steps.apply_patches.outputs.partial_count !== '0' ? `### Partially Applied Patches\n\`\`\`\n${{ steps.apply_patches.outputs.partial_patches }}\n\`\`\`` : ''}
             
-            ${steps.cherry_pick.outputs.applied_count !== '0' ? `### Applied Commits\n\`\`\`\n${{ steps.cherry_pick.outputs.applied_commits }}\n\`\`\`` : ''}
+            ${steps.apply_patches.outputs.failed_count !== '0' ? `### Failed Patches\n\`\`\`\n${{ steps.apply_patches.outputs.failed_patches }}\n\`\`\`` : ''}
             
-            Manual review may be required.`;
+            Check for .rej files in the repository for manual resolution.`;
             
             github.rest.issues.create({
               owner: context.repo.owner,
               repo: context.repo.repo,
-              title: 'Cherry-pick Summary: ' + new Date().toISOString().split('T')[0],
+              title: 'Patch Application Summary: ' + new Date().toISOString().split('T')[0],
               body: body,
-              labels: ['cherry-pick', 'kernel-update']
+              labels: ['patch', 'kernel-update']
             });
