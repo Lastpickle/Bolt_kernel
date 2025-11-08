@@ -125,6 +125,9 @@ jobs:
           PARTIAL=0
           FAILED=0
           
+          # Create temp directory for reject files
+          mkdir -p /tmp/rejects
+          
           for patch_file in /tmp/patches/*.patch; do
             [ -f "$patch_file" ] || continue
             
@@ -134,7 +137,16 @@ jobs:
             echo ""
             
             # Try to apply patch with dry-run
-            if patch --dry-run -p1 -F ${{ github.event.inputs.fuzz_factor }} < "$patch_file" 2>&1 | tee /tmp/patch_output.txt; then
+            # Options:
+            # --dry-run: Don't actually apply
+            # -p1: Strip one level of path
+            # -F: Fuzz factor
+            # -l: Ignore whitespace changes
+            # --no-backup-if-mismatch: Don't create .orig files
+            # --reject-file: Save rejects to temp location (not in source tree)
+            REJECT_FILE="/tmp/rejects/${PATCH_NAME}.rej"
+            
+            if patch --dry-run -p1 -F ${{ github.event.inputs.fuzz_factor }} -l --no-backup-if-mismatch --reject-file="$REJECT_FILE" < "$patch_file" 2>&1 | tee /tmp/patch_output.txt; then
               echo "✓ Would apply cleanly"
               
               # Show what would change
@@ -144,23 +156,26 @@ jobs:
               
               SUCCESS=$((SUCCESS + 1))
             else
-              # Check if partially applied
-              if grep -q "Hunk.*succeeded" /tmp/patch_output.txt; then
+              # Check if reject file was created
+              if [ -f "$REJECT_FILE" ]; then
                 echo "⚠ Would apply partially (some hunks would fail)"
                 echo ""
-                echo "Failed hunks:"
-                grep -E "Hunk.*FAILED" /tmp/patch_output.txt | sed 's/^/  /'
+                echo "Rejected hunks for $PATCH_NAME:"
+                echo "-----------------------------------"
+                cat "$REJECT_FILE"
+                echo "-----------------------------------"
+                
                 PARTIAL=$((PARTIAL + 1))
               else
                 echo "✗ Would fail completely"
                 FAILED=$((FAILED + 1))
               fi
               
-              # Show rejected files
-              if grep -q "saving rejects to file" /tmp/patch_output.txt; then
+              # Show failed hunks from output
+              if grep -q "Hunk.*FAILED" /tmp/patch_output.txt; then
                 echo ""
-                echo "Reject files that would be created:"
-                grep "saving rejects to file" /tmp/patch_output.txt | sed 's/^/  /'
+                echo "Failed hunks summary:"
+                grep -E "Hunk.*FAILED" /tmp/patch_output.txt | sed 's/^/  /'
               fi
             fi
             
@@ -192,6 +207,9 @@ jobs:
           FAILED_PATCHES=""
           PARTIAL_PATCHES=""
           
+          # Create temp directory for reject files (not in source tree)
+          mkdir -p /tmp/rejects
+          
           for patch_file in /tmp/patches/*.patch; do
             [ -f "$patch_file" ] || continue
             
@@ -200,8 +218,16 @@ jobs:
             echo "Applying: $PATCH_NAME"
             echo ""
             
-            # Apply patch
-            if patch -p1 -F ${{ github.event.inputs.fuzz_factor }} < "$patch_file" 2>&1 | tee /tmp/patch_output.txt; then
+            # Apply patch with maximum tolerance options:
+            # -p1: Strip one level of path
+            # -F: Fuzz factor (higher = more tolerant)
+            # -l: Ignore whitespace changes
+            # --ignore-whitespace: Ignore whitespace differences
+            # --no-backup-if-mismatch: Don't create .orig files
+            # --reject-file: Save rejects to temp location (NOT in source tree)
+            REJECT_FILE="/tmp/rejects/${PATCH_NAME}.rej"
+            
+            if patch -p1 -F ${{ github.event.inputs.fuzz_factor }} -l --ignore-whitespace --no-backup-if-mismatch --reject-file="$REJECT_FILE" < "$patch_file" 2>&1 | tee /tmp/patch_output.txt; then
               echo "✓ Applied successfully"
               SUCCESS=$((SUCCESS + 1))
               
@@ -211,17 +237,23 @@ jobs:
               git commit -m "Apply patch from commit $COMMIT_HASH" || true
               
             else
-              # Check if partially applied
-              if grep -q "Hunk.*succeeded" /tmp/patch_output.txt; then
+              # Check if reject file was created
+              if [ -f "$REJECT_FILE" ]; then
                 echo "⚠ Applied partially (some hunks failed)"
+                echo ""
+                echo "Rejected hunks:"
+                echo "-----------------------------------"
+                cat "$REJECT_FILE"
+                echo "-----------------------------------"
+                
                 PARTIAL=$((PARTIAL + 1))
                 PARTIAL_PATCHES="$PARTIAL_PATCHES$PATCH_NAME "
                 
                 case "${{ github.event.inputs.reject_strategy }}" in
                   "continue-with-rejects")
-                    echo "→ Continuing with reject files"
+                    echo "→ Continuing (reject file saved to /tmp/rejects/)"
                     git add -A
-                    git commit -m "Partial patch from $PATCH_NAME (with rejects)" || true
+                    git commit -m "Partial patch from $PATCH_NAME (see workflow logs for rejects)" || true
                     ;;
                   "skip-failed-patches")
                     echo "⊘ Skipping this patch"
@@ -255,19 +287,36 @@ jobs:
           echo "failed_patches=$FAILED_PATCHES" >> $GITHUB_OUTPUT
           echo "partial_patches=$PARTIAL_PATCHES" >> $GITHUB_OUTPUT
       
-      - name: List reject files
-        if: github.event.inputs.dry_run == 'false' && github.event.inputs.reject_strategy == 'continue-with-rejects'
+      - name: Show reject files summary
+        if: github.event.inputs.dry_run == 'false'
         run: |
-          echo "Checking for reject files..."
-          if find . -name "*.rej" -type f | grep -q .; then
-            echo "::warning::Reject files found:"
-            find . -name "*.rej" -type f
+          echo "Checking for reject files in /tmp/rejects..."
+          if ls /tmp/rejects/*.rej 1> /dev/null 2>&1; then
+            echo "::warning::Reject files found (saved outside source tree):"
+            ls -lh /tmp/rejects/*.rej
             
             echo ""
-            echo "Reject files content:"
-            find . -name "*.rej" -type f -exec echo "--- {} ---" \; -exec cat {} \; -exec echo "" \;
+            echo "All reject files content:"
+            for rej_file in /tmp/rejects/*.rej; do
+              echo "========================================"
+              echo "File: $(basename $rej_file)"
+              echo "========================================"
+              cat "$rej_file"
+              echo ""
+            done
           else
-            echo "No reject files found"
+            echo "✓ No reject files found - all patches applied cleanly"
+          fi
+          
+          # Verify no .rej or .orig files in source tree
+          echo ""
+          echo "Verifying source tree is clean..."
+          if find . -name "*.rej" -o -name "*.orig" | grep -q .; then
+            echo "::error::Found .rej or .orig files in source tree (this shouldn't happen):"
+            find . -name "*.rej" -o -name "*.orig"
+            exit 1
+          else
+            echo "✓ Source tree is clean (no .rej or .orig files)"
           fi
       
       - name: Push changes
@@ -324,7 +373,8 @@ jobs:
             
             ${steps.apply_patches.outputs.failed_count !== '0' ? `### Failed Patches\n\`\`\`\n${{ steps.apply_patches.outputs.failed_patches }}\n\`\`\`` : ''}
             
-            Check for .rej files in the repository for manual resolution.`;
+            Reject files are saved in workflow logs under /tmp/rejects/ for manual review.
+            The source tree remains clean with no .rej or .orig files.`;
             
             github.rest.issues.create({
               owner: context.repo.owner,
