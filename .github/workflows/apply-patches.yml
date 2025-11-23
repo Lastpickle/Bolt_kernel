@@ -6,13 +6,24 @@ on:
       target_branch:
         description: 'Target branch to apply patches to'
         required: true
-        default: 'main'
+        default: '14.0'
+      patch_source_type:
+        description: 'Patch source type'
+        required: true
+        type: choice
+        options:
+          - 'repo-commits'
+          - 'raw-urls'
+        default: 'repo-commits'
       source_repo:
-        description: 'Source repository URL (e.g., https://github.com/user/repo)'
-        required: true
+        description: 'Source repository URL (for repo-commits mode)'
+        required: false
       commit_hashes:
-        description: 'Commit hashes to apply as patches (comma or space separated)'
-        required: true
+        description: 'Commit hashes to apply as patches (comma or space separated, for repo-commits mode)'
+        required: false
+      raw_patch_urls:
+        description: 'Raw patch file URLs (comma or newline separated, for raw-urls mode)'
+        required: false
       dry_run:
         description: 'Dry run (no actual changes)'
         required: true
@@ -58,8 +69,23 @@ jobs:
         run: |
           git checkout ${{ github.event.inputs.target_branch }}
       
-      - name: Parse commit hashes and download patches
-        id: download_patches
+      - name: Validate inputs
+        run: |
+          if [ "${{ github.event.inputs.patch_source_type }}" = "repo-commits" ]; then
+            if [ -z "${{ github.event.inputs.source_repo }}" ] || [ -z "${{ github.event.inputs.commit_hashes }}" ]; then
+              echo "::error::For repo-commits mode, both source_repo and commit_hashes are required"
+              exit 1
+            fi
+          elif [ "${{ github.event.inputs.patch_source_type }}" = "raw-urls" ]; then
+            if [ -z "${{ github.event.inputs.raw_patch_urls }}" ]; then
+              echo "::error::For raw-urls mode, raw_patch_urls is required"
+              exit 1
+            fi
+          fi
+      
+      - name: Download patches from repo commits
+        if: github.event.inputs.patch_source_type == 'repo-commits'
+        id: download_patches_repo
         run: |
           # Parse comma or space separated commits
           COMMITS="${{ github.event.inputs.commit_hashes }}"
@@ -109,6 +135,59 @@ jobs:
             exit 1
           fi
       
+      - name: Download patches from raw URLs
+        if: github.event.inputs.patch_source_type == 'raw-urls'
+        id: download_patches_raw
+        run: |
+          # Parse URLs (support both comma and newline separation)
+          URLS="${{ github.event.inputs.raw_patch_urls }}"
+          URLS=$(echo "$URLS" | tr ',' '\n' | sed 's/^[[:space:]]*//;s/[[:space:]]*$//' | grep -v '^$')
+          
+          echo "Patch URLs to download:"
+          echo "$URLS"
+          echo ""
+          
+          mkdir -p /tmp/patches
+          COUNTER=1
+          SUCCESS=0
+          FAILED=0
+          
+          while IFS= read -r url; do
+            [ -z "$url" ] && continue
+            
+            echo "[$COUNTER] Downloading patch from: $url"
+            
+            # Generate filename from URL or use counter
+            FILENAME=$(basename "$url" .patch)
+            FILENAME=$(echo "$FILENAME" | sed 's/[^a-zA-Z0-9._-]/_/g')
+            PATCH_FILE="/tmp/patches/${COUNTER}_${FILENAME}.patch"
+            
+            if curl -f -L -s "$url" -o "$PATCH_FILE"; then
+              echo "✓ Downloaded successfully"
+              
+              # Show patch info
+              echo "Patch details:"
+              head -n 30 "$PATCH_FILE" | grep -E "^(Subject|From|Date|---)" || true
+              
+              SUCCESS=$((SUCCESS + 1))
+            else
+              echo "✗ Failed to download: $url"
+              FAILED=$((FAILED + 1))
+            fi
+            
+            echo ""
+            COUNTER=$((COUNTER + 1))
+          done <<< "$URLS"
+          
+          echo "download_success=$SUCCESS" >> $GITHUB_OUTPUT
+          echo "download_failed=$FAILED" >> $GITHUB_OUTPUT
+          echo "::notice::Downloaded $SUCCESS patches, $FAILED failed"
+          
+          if [ $SUCCESS -eq 0 ]; then
+            echo "::error::No patches downloaded successfully"
+            exit 1
+          fi
+      
       - name: Dry run - Test patch application
         if: github.event.inputs.dry_run == 'true'
         run: |
@@ -116,8 +195,15 @@ jobs:
           echo "DRY RUN MODE - No changes will be committed"
           echo "=========================================="
           echo "Target branch: ${{ github.event.inputs.target_branch }}"
+          echo "Patch source: ${{ github.event.inputs.patch_source_type }}"
           echo "Fuzz factor: ${{ github.event.inputs.fuzz_factor }}"
-          echo "Patches to apply: ${{ steps.download_patches.outputs.download_success }}"
+          
+          if [ "${{ github.event.inputs.patch_source_type }}" = "repo-commits" ]; then
+            echo "Patches to apply: ${{ steps.download_patches_repo.outputs.download_success }}"
+          else
+            echo "Patches to apply: ${{ steps.download_patches_raw.outputs.download_success }}"
+          fi
+          
           echo "=========================================="
           echo ""
           
@@ -136,14 +222,6 @@ jobs:
             echo "Testing: $PATCH_NAME"
             echo ""
             
-            # Try to apply patch with dry-run
-            # Options:
-            # --dry-run: Don't actually apply
-            # -p1: Strip one level of path
-            # -F: Fuzz factor
-            # -l: Ignore whitespace changes
-            # --no-backup-if-mismatch: Don't create .orig files
-            # --reject-file: Save rejects to temp location (not in source tree)
             REJECT_FILE="/tmp/rejects/${PATCH_NAME}.rej"
             
             if patch --dry-run -p1 -F ${{ github.event.inputs.fuzz_factor }} -l --no-backup-if-mismatch --reject-file="$REJECT_FILE" < "$patch_file" 2>&1 | tee /tmp/patch_output.txt; then
@@ -218,23 +296,58 @@ jobs:
             echo "Applying: $PATCH_NAME"
             echo ""
             
-            # Apply patch with maximum tolerance options:
-            # -p1: Strip one level of path
-            # -F: Fuzz factor (higher = more tolerant)
-            # -l: Ignore whitespace changes
-            # --ignore-whitespace: Ignore whitespace differences
-            # --no-backup-if-mismatch: Don't create .orig files
-            # --reject-file: Save rejects to temp location (NOT in source tree)
+            # Extract commit metadata from patch file
+            SUBJECT=$(grep -m1 "^Subject:" "$patch_file" | sed 's/^Subject: //' | sed 's/^\[PATCH[^]]*\] *//')
+            AUTHOR=$(grep -m1 "^From:" "$patch_file" | sed 's/^From: //')
+            DATE=$(grep -m1 "^Date:" "$patch_file" | sed 's/^Date: //')
+            
+            # If no proper headers, try to extract from git format-patch style
+            if [ -z "$SUBJECT" ]; then
+              SUBJECT=$(head -n 50 "$patch_file" | grep -v "^From " | grep -v "^---" | grep -v "^diff" | grep -v "^index" | head -n 1)
+            fi
+            
+            # Fallback to filename if still empty
+            if [ -z "$SUBJECT" ]; then
+              SUBJECT="$PATCH_NAME"
+            fi
+            
+            echo "Subject: $SUBJECT"
+            [ -n "$AUTHOR" ] && echo "Author: $AUTHOR"
+            [ -n "$DATE" ] && echo "Date: $DATE"
+            echo ""
+            
             REJECT_FILE="/tmp/rejects/${PATCH_NAME}.rej"
             
             if patch -p1 -F ${{ github.event.inputs.fuzz_factor }} -l --ignore-whitespace --no-backup-if-mismatch --reject-file="$REJECT_FILE" < "$patch_file" 2>&1 | tee /tmp/patch_output.txt; then
               echo "✓ Applied successfully"
               SUCCESS=$((SUCCESS + 1))
               
-              # Commit the changes
-              COMMIT_HASH=$(echo "$PATCH_NAME" | grep -oE '[a-f0-9]{7,}')
+              # Create detailed commit message
+              COMMIT_MSG="$SUBJECT"
+              
+              if [ -n "$AUTHOR" ] || [ -n "$DATE" ]; then
+                COMMIT_MSG="$COMMIT_MSG
+
+"
+                [ -n "$AUTHOR" ] && COMMIT_MSG="${COMMIT_MSG}Original-author: $AUTHOR
+"
+                [ -n "$DATE" ] && COMMIT_MSG="${COMMIT_MSG}Original-date: $DATE
+"
+              fi
+              
+              # Add source info
+              if [ "${{ github.event.inputs.patch_source_type }}" = "repo-commits" ]; then
+                COMMIT_HASH=$(echo "$PATCH_NAME" | grep -oE '[a-f0-9]{7,}')
+                COMMIT_MSG="${COMMIT_MSG}
+Source: ${{ github.event.inputs.source_repo }}/commit/$COMMIT_HASH"
+              else
+                COMMIT_MSG="${COMMIT_MSG}
+Source: Raw patch file"
+              fi
+              
+              # Commit the changes with detailed message
               git add -A
-              git commit -m "Apply patch from commit $COMMIT_HASH" || true
+              git commit -m "$COMMIT_MSG" || true
               
             else
               # Check if reject file was created
@@ -252,8 +365,18 @@ jobs:
                 case "${{ github.event.inputs.reject_strategy }}" in
                   "continue-with-rejects")
                     echo "→ Continuing (reject file saved to /tmp/rejects/)"
+                    
+                    # Create commit message for partial patch
+                    COMMIT_MSG="[PARTIAL] $SUBJECT
+
+⚠️ This patch was partially applied. Some hunks failed.
+Check workflow logs for rejected hunks.
+"
+                    [ -n "$AUTHOR" ] && COMMIT_MSG="${COMMIT_MSG}
+Original-author: $AUTHOR"
+                    
                     git add -A
-                    git commit -m "Partial patch from $PATCH_NAME (see workflow logs for rejects)" || true
+                    git commit -m "$COMMIT_MSG" || true
                     ;;
                   "skip-failed-patches")
                     echo "⊘ Skipping this patch"
@@ -357,9 +480,13 @@ jobs:
         uses: actions/github-script@v7
         with:
           script: |
+            const sourceInfo = '${{ github.event.inputs.patch_source_type }}' === 'repo-commits' 
+              ? `**Source:** ${{ github.event.inputs.source_repo }}`
+              : `**Source:** Raw patch URLs`;
+            
             const body = `## Patch Application Summary
             
-            **Source:** ${{ github.event.inputs.source_repo }}
+            ${sourceInfo}
             **Target branch:** ${{ github.event.inputs.target_branch }}
             **Fuzz factor:** ${{ github.event.inputs.fuzz_factor }}
             **Reject strategy:** ${{ github.event.inputs.reject_strategy }}
@@ -369,9 +496,9 @@ jobs:
             - ⚠️ Partially applied: ${{ steps.apply_patches.outputs.partial_count }}
             - ❌ Failed: ${{ steps.apply_patches.outputs.failed_count }}
             
-            ${steps.apply_patches.outputs.partial_count !== '0' ? `### Partially Applied Patches\n\`\`\`\n${{ steps.apply_patches.outputs.partial_patches }}\n\`\`\`` : ''}
+            ${'${{ steps.apply_patches.outputs.partial_count }}' !== '0' ? `### Partially Applied Patches\n\`\`\`\n${{ steps.apply_patches.outputs.partial_patches }}\n\`\`\`` : ''}
             
-            ${steps.apply_patches.outputs.failed_count !== '0' ? `### Failed Patches\n\`\`\`\n${{ steps.apply_patches.outputs.failed_patches }}\n\`\`\`` : ''}
+            ${'${{ steps.apply_patches.outputs.failed_count }}' !== '0' ? `### Failed Patches\n\`\`\`\n${{ steps.apply_patches.outputs.failed_patches }}\n\`\`\`` : ''}
             
             Reject files are saved in workflow logs under /tmp/rejects/ for manual review.
             The source tree remains clean with no .rej or .orig files.`;
