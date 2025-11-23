@@ -328,21 +328,21 @@ jobs:
               if [ -n "$AUTHOR" ] || [ -n "$DATE" ]; then
                 COMMIT_MSG="$COMMIT_MSG
 
-"
+          "
                 [ -n "$AUTHOR" ] && COMMIT_MSG="${COMMIT_MSG}Original-author: $AUTHOR
-"
+          "
                 [ -n "$DATE" ] && COMMIT_MSG="${COMMIT_MSG}Original-date: $DATE
-"
+          "
               fi
               
               # Add source info
               if [ "${{ github.event.inputs.patch_source_type }}" = "repo-commits" ]; then
                 COMMIT_HASH=$(echo "$PATCH_NAME" | grep -oE '[a-f0-9]{7,}')
                 COMMIT_MSG="${COMMIT_MSG}
-Source: ${{ github.event.inputs.source_repo }}/commit/$COMMIT_HASH"
+          Source: ${{ github.event.inputs.source_repo }}/commit/$COMMIT_HASH"
               else
                 COMMIT_MSG="${COMMIT_MSG}
-Source: Raw patch file"
+          Source: Raw patch file"
               fi
               
               # Commit the changes with detailed message
@@ -369,12 +369,12 @@ Source: Raw patch file"
                     # Create commit message for partial patch
                     COMMIT_MSG="[PARTIAL] $SUBJECT
 
-⚠️ This patch was partially applied. Some hunks failed.
-Check workflow logs for rejected hunks.
-"
+          ⚠️ This patch was partially applied. Some hunks failed.
+          Check workflow logs for rejected hunks.
+          "
                     [ -n "$AUTHOR" ] && COMMIT_MSG="${COMMIT_MSG}
-Original-author: $AUTHOR"
-                    
+          Original-author: $AUTHOR"
+                     
                     git add -A
                     git commit -m "$COMMIT_MSG" || true
                     ;;
@@ -480,11 +480,15 @@ Original-author: $AUTHOR"
         uses: actions/github-script@v7
         with:
           script: |
-            const sourceInfo = '${{ github.event.inputs.patch_source_type }}' === 'repo-commits' 
-              ? `**Source:** ${{ github.event.inputs.source_repo }}`
-              : `**Source:** Raw patch URLs`;
+            const patchSourceType = '${{ github.event.inputs.patch_source_type }}';
+            const sourceInfo = patchSourceType === 'repo-commits' 
+              ? '**Source:** ${{ github.event.inputs.source_repo }}'
+              : '**Source:** Raw patch URLs';
             
-            const body = `## Patch Application Summary
+            const partialCount = '${{ steps.apply_patches.outputs.partial_count }}';
+            const failedCount = '${{ steps.apply_patches.outputs.failed_count }}';
+            
+            let body = `## Patch Application Summary
             
             ${sourceInfo}
             **Target branch:** ${{ github.event.inputs.target_branch }}
@@ -493,15 +497,19 @@ Original-author: $AUTHOR"
             
             ### Results
             - ✅ Successfully applied: ${{ steps.apply_patches.outputs.success_count }}
-            - ⚠️ Partially applied: ${{ steps.apply_patches.outputs.partial_count }}
-            - ❌ Failed: ${{ steps.apply_patches.outputs.failed_count }}
+            - ⚠️ Partially applied: ${partialCount}
+            - ❌ Failed: ${failedCount}
+            `;
             
-            ${'${{ steps.apply_patches.outputs.partial_count }}' !== '0' ? `### Partially Applied Patches\n\`\`\`\n${{ steps.apply_patches.outputs.partial_patches }}\n\`\`\`` : ''}
+            if (partialCount !== '0') {
+              body += `\n### Partially Applied Patches\n\`\`\`\n${{ steps.apply_patches.outputs.partial_patches }}\n\`\`\`\n`;
+            }
             
-            ${'${{ steps.apply_patches.outputs.failed_count }}' !== '0' ? `### Failed Patches\n\`\`\`\n${{ steps.apply_patches.outputs.failed_patches }}\n\`\`\`` : ''}
+            if (failedCount !== '0') {
+              body += `\n### Failed Patches\n\`\`\`\n${{ steps.apply_patches.outputs.failed_patches }}\n\`\`\`\n`;
+            }
             
-            Reject files are saved in workflow logs under /tmp/rejects/ for manual review.
-            The source tree remains clean with no .rej or .orig files.`;
+            body += `\nReject files are saved in workflow logs under /tmp/rejects/ for manual review.\nThe source tree remains clean with no .rej or .orig files.`;
             
             github.rest.issues.create({
               owner: context.repo.owner,
