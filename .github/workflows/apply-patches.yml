@@ -109,8 +109,10 @@ jobs:
           echo "=========================================="
           echo ""
           
-          # Parse file replacements
-          REPLACEMENTS="${{ github.event.inputs.file_replacements }}"
+          # Store input in a temp file to preserve newlines
+          cat > /tmp/file_replacements.txt << 'EOF'
+          ${{ github.event.inputs.file_replacements }}
+          EOF
           
           SUCCESS=0
           FAILED=0
@@ -122,12 +124,30 @@ jobs:
           # Store current state for comparison
           mkdir -p /tmp/file_comparison
           
+          echo "Parsing file replacements..."
+          echo ""
+          
           while IFS= read -r line; do
+            # Skip empty lines and trim whitespace
+            line=$(echo "$line" | xargs)
             [ -z "$line" ] && continue
             
             # Parse line: filepath=url
+            if ! echo "$line" | grep -q '='; then
+              echo "⚠ Skipping invalid line (no '=' found): $line"
+              echo ""
+              continue
+            fi
+            
             FILE_PATH=$(echo "$line" | cut -d'=' -f1 | xargs)
             RAW_URL=$(echo "$line" | cut -d'=' -f2- | xargs)
+            
+            # Validate we got both parts
+            if [ -z "$FILE_PATH" ] || [ -z "$RAW_URL" ]; then
+              echo "⚠ Skipping invalid line: $line"
+              echo ""
+              continue
+            fi
             
             echo "----------------------------------------"
             echo "File: $FILE_PATH"
@@ -142,14 +162,17 @@ jobs:
             FILE_EXISTS=false
             if [ -f "$FILE_PATH" ]; then
               FILE_EXISTS=true
-              cp "$FILE_PATH" "/tmp/file_comparison/$(basename $FILE_PATH).old"
+              # Use full path hash for unique filenames
+              FILE_HASH=$(echo "$FILE_PATH" | md5sum | cut -d' ' -f1)
+              cp "$FILE_PATH" "/tmp/file_comparison/${FILE_HASH}.old"
               echo "Status: File exists, will be replaced"
             else
+              FILE_HASH=$(echo "$FILE_PATH" | md5sum | cut -d' ' -f1)
               echo "Status: New file will be created"
             fi
             
             # Download the new content
-            if curl -f -L -s "$RAW_URL" -o "/tmp/file_comparison/$(basename $FILE_PATH).new"; then
+            if curl -f -L -s "$RAW_URL" -o "/tmp/file_comparison/${FILE_HASH}.new"; then
               echo "✓ Downloaded successfully"
               
               if [ "${{ github.event.inputs.dry_run }}" = "true" ]; then
@@ -158,33 +181,33 @@ jobs:
                   echo ""
                   echo "Changes that would be made:"
                   echo "-----------------------------------"
-                  diff -u "/tmp/file_comparison/$(basename $FILE_PATH).old" "/tmp/file_comparison/$(basename $FILE_PATH).new" || true
+                  diff -u "/tmp/file_comparison/${FILE_HASH}.old" "/tmp/file_comparison/${FILE_HASH}.new" || true
                   echo "-----------------------------------"
                   
                   # Count changes
-                  ADDS=$(diff "/tmp/file_comparison/$(basename $FILE_PATH).old" "/tmp/file_comparison/$(basename $FILE_PATH).new" | grep -c "^>" || echo "0")
-                  DELS=$(diff "/tmp/file_comparison/$(basename $FILE_PATH).old" "/tmp/file_comparison/$(basename $FILE_PATH).new" | grep -c "^<" || echo "0")
+                  ADDS=$(diff "/tmp/file_comparison/${FILE_HASH}.old" "/tmp/file_comparison/${FILE_HASH}.new" 2>/dev/null | grep -c "^>" || echo "0")
+                  DELS=$(diff "/tmp/file_comparison/${FILE_HASH}.old" "/tmp/file_comparison/${FILE_HASH}.new" 2>/dev/null | grep -c "^<" || echo "0")
                   echo "Lines added: $ADDS, Lines removed: $DELS"
                 else
-                  LINES=$(wc -l < "/tmp/file_comparison/$(basename $FILE_PATH).new")
+                  LINES=$(wc -l < "/tmp/file_comparison/${FILE_HASH}.new")
                   echo "New file would be created with $LINES lines"
                   ADDS=$LINES
                   DELS=0
                 fi
               else
                 # Actually replace the file
-                cp "/tmp/file_comparison/$(basename $FILE_PATH).new" "$FILE_PATH"
+                cp "/tmp/file_comparison/${FILE_HASH}.new" "$FILE_PATH"
                 
                 if [ "$FILE_EXISTS" = true ]; then
                   echo ""
                   echo "File replaced. Changes made:"
                   echo "-----------------------------------"
-                  diff -u "/tmp/file_comparison/$(basename $FILE_PATH).old" "/tmp/file_comparison/$(basename $FILE_PATH).new" || true
+                  diff -u "/tmp/file_comparison/${FILE_HASH}.old" "/tmp/file_comparison/${FILE_HASH}.new" || true
                   echo "-----------------------------------"
                   
                   # Count changes
-                  ADDS=$(diff "/tmp/file_comparison/$(basename $FILE_PATH).old" "/tmp/file_comparison/$(basename $FILE_PATH).new" | grep -c "^>" || echo "0")
-                  DELS=$(diff "/tmp/file_comparison/$(basename $FILE_PATH).old" "/tmp/file_comparison/$(basename $FILE_PATH).new" | grep -c "^<" || echo "0")
+                  ADDS=$(diff "/tmp/file_comparison/${FILE_HASH}.old" "/tmp/file_comparison/${FILE_HASH}.new" 2>/dev/null | grep -c "^>" || echo "0")
+                  DELS=$(diff "/tmp/file_comparison/${FILE_HASH}.old" "/tmp/file_comparison/${FILE_HASH}.new" 2>/dev/null | grep -c "^<" || echo "0")
                   echo "Lines added: $ADDS, Lines removed: $DELS"
                 else
                   LINES=$(wc -l < "$FILE_PATH")
@@ -206,7 +229,7 @@ jobs:
             fi
             
             echo ""
-          done <<< "$REPLACEMENTS"
+          done < /tmp/file_replacements.txt
           
           echo "=========================================="
           echo "File Replacement Summary:"
@@ -246,16 +269,16 @@ jobs:
             
             # Add file list to commit message
             COMMIT_MSG="$COMMIT_MSG
-            Files updated:
-            "
+          Files updated:
+          "
             for file in ${{ steps.replace_files.outputs.changed_files }}; do
               COMMIT_MSG="$COMMIT_MSG- $file
           "
             done
             
             COMMIT_MSG="$COMMIT_MSG
-            Summary: ${{ steps.replace_files.outputs.success_count }} file(s) updated
-            Changes: +${{ steps.replace_files.outputs.total_additions }} -${{ steps.replace_files.outputs.total_deletions }} lines"
+          Summary: ${{ steps.replace_files.outputs.success_count }} file(s) updated
+          Changes: +${{ steps.replace_files.outputs.total_additions }} -${{ steps.replace_files.outputs.total_deletions }} lines"
             
             git add -A
             git commit -m "$COMMIT_MSG"
@@ -510,21 +533,21 @@ jobs:
               if [ -n "$AUTHOR" ] || [ -n "$DATE" ]; then
                 COMMIT_MSG="$COMMIT_MSG
 
-          "
+              "
                 [ -n "$AUTHOR" ] && COMMIT_MSG="${COMMIT_MSG}Original-author: $AUTHOR
-          "
+              "
                 [ -n "$DATE" ] && COMMIT_MSG="${COMMIT_MSG}Original-date: $DATE
-          "
+              "
               fi
               
               # Add source info
               if [ "${{ github.event.inputs.patch_source_type }}" = "repo-commits" ]; then
                 COMMIT_HASH=$(echo "$PATCH_NAME" | grep -oE '[a-f0-9]{7,}')
                 COMMIT_MSG="${COMMIT_MSG}
-              Source: ${{ github.event.inputs.source_repo }}/commit/$COMMIT_HASH"
+           Source: ${{ github.event.inputs.source_repo }}/commit/$COMMIT_HASH"
               else
                 COMMIT_MSG="${COMMIT_MSG}
-              Source: Raw patch file"
+           Source: Raw patch file"
               fi
               
               # Commit the changes with detailed message
@@ -551,11 +574,11 @@ jobs:
                     # Create commit message for partial patch
                     COMMIT_MSG="[PARTIAL] $SUBJECT
 
-                   ⚠️ This patch was partially applied. Some hunks failed.
-                   Check workflow logs for rejected hunks.
-          "
+               ⚠️ This patch was partially applied. Some hunks failed.
+               Check workflow logs for rejected hunks.
+              "
                     [ -n "$AUTHOR" ] && COMMIT_MSG="${COMMIT_MSG}
-          Original-author: $AUTHOR"
+              Original-author: $AUTHOR"
                     
                     git add -A
                     git commit -m "$COMMIT_MSG" || true
