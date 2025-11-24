@@ -14,6 +14,7 @@ on:
         options:
           - 'repo-commits'
           - 'raw-urls'
+          - 'replace-files'
         default: 'repo-commits'
       source_repo:
         description: 'Source repository URL (for repo-commits mode)'
@@ -24,6 +25,13 @@ on:
       raw_patch_urls:
         description: 'Raw patch file URLs (comma or newline separated, for raw-urls mode)'
         required: false
+      file_replacements:
+        description: 'File replacements in format: path/to/file.c=https://raw.url (one per line, for replace-files mode)'
+        required: false
+      replacement_commit_message:
+        description: 'Custom commit message for file replacements (optional)'
+        required: false
+        default: 'Update files from upstream'
       dry_run:
         description: 'Dry run (no actual changes)'
         required: true
@@ -81,6 +89,180 @@ jobs:
               echo "::error::For raw-urls mode, raw_patch_urls is required"
               exit 1
             fi
+          elif [ "${{ github.event.inputs.patch_source_type }}" = "replace-files" ]; then
+            if [ -z "${{ github.event.inputs.file_replacements }}" ]; then
+              echo "::error::For replace-files mode, file_replacements is required"
+              exit 1
+            fi
+          fi
+      
+      - name: Replace files from raw URLs
+        if: github.event.inputs.patch_source_type == 'replace-files'
+        id: replace_files
+        run: |
+          echo "=========================================="
+          if [ "${{ github.event.inputs.dry_run }}" = "true" ]; then
+            echo "DRY RUN MODE - File Replacement"
+          else
+            echo "FILE REPLACEMENT MODE"
+          fi
+          echo "=========================================="
+          echo ""
+          
+          # Parse file replacements
+          REPLACEMENTS="${{ github.event.inputs.file_replacements }}"
+          
+          SUCCESS=0
+          FAILED=0
+          CHANGED_FILES=""
+          FAILED_FILES=""
+          TOTAL_ADDITIONS=0
+          TOTAL_DELETIONS=0
+          
+          # Store current state for comparison
+          mkdir -p /tmp/file_comparison
+          
+          while IFS= read -r line; do
+            [ -z "$line" ] && continue
+            
+            # Parse line: filepath=url
+            FILE_PATH=$(echo "$line" | cut -d'=' -f1 | xargs)
+            RAW_URL=$(echo "$line" | cut -d'=' -f2- | xargs)
+            
+            echo "----------------------------------------"
+            echo "File: $FILE_PATH"
+            echo "Source: $RAW_URL"
+            echo ""
+            
+            # Create directory if it doesn't exist
+            FILE_DIR=$(dirname "$FILE_PATH")
+            mkdir -p "$FILE_DIR"
+            
+            # Check if file exists and backup for comparison
+            FILE_EXISTS=false
+            if [ -f "$FILE_PATH" ]; then
+              FILE_EXISTS=true
+              cp "$FILE_PATH" "/tmp/file_comparison/$(basename $FILE_PATH).old"
+              echo "Status: File exists, will be replaced"
+            else
+              echo "Status: New file will be created"
+            fi
+            
+            # Download the new content
+            if curl -f -L -s "$RAW_URL" -o "/tmp/file_comparison/$(basename $FILE_PATH).new"; then
+              echo "✓ Downloaded successfully"
+              
+              if [ "${{ github.event.inputs.dry_run }}" = "true" ]; then
+                # Dry run - just show what would change
+                if [ "$FILE_EXISTS" = true ]; then
+                  echo ""
+                  echo "Changes that would be made:"
+                  echo "-----------------------------------"
+                  diff -u "/tmp/file_comparison/$(basename $FILE_PATH).old" "/tmp/file_comparison/$(basename $FILE_PATH).new" || true
+                  echo "-----------------------------------"
+                  
+                  # Count changes
+                  ADDS=$(diff "/tmp/file_comparison/$(basename $FILE_PATH).old" "/tmp/file_comparison/$(basename $FILE_PATH).new" | grep -c "^>" || echo "0")
+                  DELS=$(diff "/tmp/file_comparison/$(basename $FILE_PATH).old" "/tmp/file_comparison/$(basename $FILE_PATH).new" | grep -c "^<" || echo "0")
+                  echo "Lines added: $ADDS, Lines removed: $DELS"
+                else
+                  LINES=$(wc -l < "/tmp/file_comparison/$(basename $FILE_PATH).new")
+                  echo "New file would be created with $LINES lines"
+                  ADDS=$LINES
+                  DELS=0
+                fi
+              else
+                # Actually replace the file
+                cp "/tmp/file_comparison/$(basename $FILE_PATH).new" "$FILE_PATH"
+                
+                if [ "$FILE_EXISTS" = true ]; then
+                  echo ""
+                  echo "File replaced. Changes made:"
+                  echo "-----------------------------------"
+                  diff -u "/tmp/file_comparison/$(basename $FILE_PATH).old" "/tmp/file_comparison/$(basename $FILE_PATH).new" || true
+                  echo "-----------------------------------"
+                  
+                  # Count changes
+                  ADDS=$(diff "/tmp/file_comparison/$(basename $FILE_PATH).old" "/tmp/file_comparison/$(basename $FILE_PATH).new" | grep -c "^>" || echo "0")
+                  DELS=$(diff "/tmp/file_comparison/$(basename $FILE_PATH).old" "/tmp/file_comparison/$(basename $FILE_PATH).new" | grep -c "^<" || echo "0")
+                  echo "Lines added: $ADDS, Lines removed: $DELS"
+                else
+                  LINES=$(wc -l < "$FILE_PATH")
+                  echo "New file created with $LINES lines"
+                  ADDS=$LINES
+                  DELS=0
+                fi
+                
+                TOTAL_ADDITIONS=$((TOTAL_ADDITIONS + ADDS))
+                TOTAL_DELETIONS=$((TOTAL_DELETIONS + DELS))
+              fi
+              
+              SUCCESS=$((SUCCESS + 1))
+              CHANGED_FILES="$CHANGED_FILES$FILE_PATH "
+            else
+              echo "✗ Failed to download from: $RAW_URL"
+              FAILED=$((FAILED + 1))
+              FAILED_FILES="$FAILED_FILES$FILE_PATH "
+            fi
+            
+            echo ""
+          done <<< "$REPLACEMENTS"
+          
+          echo "=========================================="
+          echo "File Replacement Summary:"
+          echo "  Successfully processed: $SUCCESS"
+          echo "  Failed: $FAILED"
+          if [ "${{ github.event.inputs.dry_run }}" = "false" ]; then
+            echo "  Total lines added: $TOTAL_ADDITIONS"
+            echo "  Total lines removed: $TOTAL_DELETIONS"
+          fi
+          echo "=========================================="
+          
+          echo "success_count=$SUCCESS" >> $GITHUB_OUTPUT
+          echo "failed_count=$FAILED" >> $GITHUB_OUTPUT
+          echo "changed_files=$CHANGED_FILES" >> $GITHUB_OUTPUT
+          echo "failed_files=$FAILED_FILES" >> $GITHUB_OUTPUT
+          echo "total_additions=$TOTAL_ADDITIONS" >> $GITHUB_OUTPUT
+          echo "total_deletions=$TOTAL_DELETIONS" >> $GITHUB_OUTPUT
+          
+          if [ $FAILED -gt 0 ]; then
+            echo "::warning::$FAILED files failed to download"
+          fi
+          
+          if [ $SUCCESS -eq 0 ]; then
+            echo "::error::No files processed successfully"
+            exit 1
+          fi
+      
+      - name: Commit file replacements
+        if: github.event.inputs.patch_source_type == 'replace-files' && github.event.inputs.dry_run == 'false'
+        run: |
+          # Check if there are any changes
+          if ! git diff --quiet; then
+            echo "Committing changes..."
+            
+            # Build commit message
+            COMMIT_MSG="${{ github.event.inputs.replacement_commit_message }}"
+            
+            # Add file list to commit message
+            COMMIT_MSG="$COMMIT_MSG
+            Files updated:
+            "
+            for file in ${{ steps.replace_files.outputs.changed_files }}; do
+              COMMIT_MSG="$COMMIT_MSG- $file
+          "
+            done
+            
+            COMMIT_MSG="$COMMIT_MSG
+            Summary: ${{ steps.replace_files.outputs.success_count }} file(s) updated
+            Changes: +${{ steps.replace_files.outputs.total_additions }} -${{ steps.replace_files.outputs.total_deletions }} lines"
+            
+            git add -A
+            git commit -m "$COMMIT_MSG"
+            
+            echo "✓ Changes committed successfully"
+          else
+            echo "No changes to commit"
           fi
       
       - name: Download patches from repo commits
@@ -189,7 +371,7 @@ jobs:
           fi
       
       - name: Dry run - Test patch application
-        if: github.event.inputs.dry_run == 'true'
+        if: github.event.inputs.dry_run == 'true' && github.event.inputs.patch_source_type != 'replace-files'
         run: |
           echo "=========================================="
           echo "DRY RUN MODE - No changes will be committed"
@@ -276,7 +458,7 @@ jobs:
           fi
       
       - name: Apply patches
-        if: github.event.inputs.dry_run == 'false'
+        if: github.event.inputs.dry_run == 'false' && github.event.inputs.patch_source_type != 'replace-files'
         id: apply_patches
         run: |
           SUCCESS=0
@@ -339,10 +521,10 @@ jobs:
               if [ "${{ github.event.inputs.patch_source_type }}" = "repo-commits" ]; then
                 COMMIT_HASH=$(echo "$PATCH_NAME" | grep -oE '[a-f0-9]{7,}')
                 COMMIT_MSG="${COMMIT_MSG}
-          Source: ${{ github.event.inputs.source_repo }}/commit/$COMMIT_HASH"
+              Source: ${{ github.event.inputs.source_repo }}/commit/$COMMIT_HASH"
               else
                 COMMIT_MSG="${COMMIT_MSG}
-          Source: Raw patch file"
+              Source: Raw patch file"
               fi
               
               # Commit the changes with detailed message
@@ -369,12 +551,12 @@ jobs:
                     # Create commit message for partial patch
                     COMMIT_MSG="[PARTIAL] $SUBJECT
 
-          ⚠️ This patch was partially applied. Some hunks failed.
-          Check workflow logs for rejected hunks.
+                   ⚠️ This patch was partially applied. Some hunks failed.
+                   Check workflow logs for rejected hunks.
           "
                     [ -n "$AUTHOR" ] && COMMIT_MSG="${COMMIT_MSG}
           Original-author: $AUTHOR"
-                     
+                    
                     git add -A
                     git commit -m "$COMMIT_MSG" || true
                     ;;
@@ -411,7 +593,7 @@ jobs:
           echo "partial_patches=$PARTIAL_PATCHES" >> $GITHUB_OUTPUT
       
       - name: Show reject files summary
-        if: github.event.inputs.dry_run == 'false'
+        if: github.event.inputs.dry_run == 'false' && github.event.inputs.patch_source_type != 'replace-files'
         run: |
           echo "Checking for reject files in /tmp/rejects..."
           if ls /tmp/rejects/*.rej 1> /dev/null 2>&1; then
@@ -443,40 +625,59 @@ jobs:
           fi
       
       - name: Push changes
-        if: github.event.inputs.dry_run == 'false' && steps.apply_patches.outputs.success_count != '0'
+        if: github.event.inputs.dry_run == 'false'
         run: |
-          if git diff --quiet origin/${{ github.event.inputs.target_branch }}; then
-            echo "::notice::No changes to push"
+          # Check which mode was used and get appropriate success count
+          if [ "${{ github.event.inputs.patch_source_type }}" = "replace-files" ]; then
+            SUCCESS_COUNT="${{ steps.replace_files.outputs.success_count }}"
           else
-            git push origin ${{ github.event.inputs.target_branch }}
-            echo "::notice::Successfully pushed changes"
+            SUCCESS_COUNT="${{ steps.apply_patches.outputs.success_count }}"
+          fi
+          
+          if [ "$SUCCESS_COUNT" != "0" ]; then
+            if git diff --quiet origin/${{ github.event.inputs.target_branch }}; then
+              echo "::notice::No changes to push"
+            else
+              git push origin ${{ github.event.inputs.target_branch }}
+              echo "::notice::Successfully pushed changes"
+            fi
+          else
+            echo "::notice::No successful operations, nothing to push"
           fi
       
       - name: Final summary
         if: github.event.inputs.dry_run == 'false'
         run: |
           echo "=========================================="
-          echo "Patch Application Complete!"
-          echo "=========================================="
-          echo "Successfully applied: ${{ steps.apply_patches.outputs.success_count }}"
-          echo "Partially applied: ${{ steps.apply_patches.outputs.partial_count }}"
-          echo "Failed: ${{ steps.apply_patches.outputs.failed_count }}"
-          echo "=========================================="
-          
-          if [ "${{ steps.apply_patches.outputs.partial_count }}" != "0" ]; then
-            echo ""
-            echo "Partially applied patches:"
-            echo "${{ steps.apply_patches.outputs.partial_patches }}" | tr ' ' '\n'
+          if [ "${{ github.event.inputs.patch_source_type }}" = "replace-files" ]; then
+            echo "File Replacement Complete!"
+            echo "=========================================="
+            echo "Successfully processed: ${{ steps.replace_files.outputs.success_count }}"
+            echo "Failed: ${{ steps.replace_files.outputs.failed_count }}"
+            echo "Total changes: +${{ steps.replace_files.outputs.total_additions }} -${{ steps.replace_files.outputs.total_deletions }} lines"
+          else
+            echo "Patch Application Complete!"
+            echo "=========================================="
+            echo "Successfully applied: ${{ steps.apply_patches.outputs.success_count }}"
+            echo "Partially applied: ${{ steps.apply_patches.outputs.partial_count }}"
+            echo "Failed: ${{ steps.apply_patches.outputs.failed_count }}"
+            
+            if [ "${{ steps.apply_patches.outputs.partial_count }}" != "0" ]; then
+              echo ""
+              echo "Partially applied patches:"
+              echo "${{ steps.apply_patches.outputs.partial_patches }}" | tr ' ' '\n'
+            fi
+            
+            if [ "${{ steps.apply_patches.outputs.failed_count }}" != "0" ]; then
+              echo ""
+              echo "Failed patches:"
+              echo "${{ steps.apply_patches.outputs.failed_patches }}" | tr ' ' '\n'
+            fi
           fi
-          
-          if [ "${{ steps.apply_patches.outputs.failed_count }}" != "0" ]; then
-            echo ""
-            echo "Failed patches:"
-            echo "${{ steps.apply_patches.outputs.failed_patches }}" | tr ' ' '\n'
-          fi
+          echo "=========================================="
       
       - name: Create summary issue
-        if: github.event.inputs.dry_run == 'false' && (steps.apply_patches.outputs.partial_count != '0' || steps.apply_patches.outputs.failed_count != '0')
+        if: github.event.inputs.dry_run == 'false' && github.event.inputs.patch_source_type != 'replace-files' && (steps.apply_patches.outputs.partial_count != '0' || steps.apply_patches.outputs.failed_count != '0')
         uses: actions/github-script@v7
         with:
           script: |
