@@ -26,7 +26,7 @@ on:
         description: 'Raw patch file URLs (comma or newline separated, for raw-urls mode)'
         required: false
       file_replacements:
-        description: 'File replacements in format: path/to/file.c=https://raw.url (one per line, for replace-files mode)'
+        description: 'File replacements in format: path/to/file.c=https://raw.url (comma or newline separated, for replace-files mode)'
         required: false
       replacement_commit_message:
         description: 'Custom commit message for file replacements (optional)'
@@ -109,10 +109,10 @@ jobs:
           echo "=========================================="
           echo ""
           
-          # Store input in a temp file to preserve newlines
-          cat > /tmp/file_replacements.txt << 'EOF'
-          ${{ github.event.inputs.file_replacements }}
-          EOF
+          # Parse file replacements - support both comma and newline separation
+          REPLACEMENTS="${{ github.event.inputs.file_replacements }}"
+          # Replace commas with newlines, then clean up whitespace
+          REPLACEMENTS=$(echo "$REPLACEMENTS" | tr ',' '\n' | sed 's/^[[:space:]]*//;s/[[:space:]]*$//' | grep -v '^$')
           
           SUCCESS=0
           FAILED=0
@@ -229,7 +229,7 @@ jobs:
             fi
             
             echo ""
-          done < /tmp/file_replacements.txt
+          done <<< "$REPLACEMENTS"
           
           echo "=========================================="
           echo "File Replacement Summary:"
@@ -269,6 +269,7 @@ jobs:
             
             # Add file list to commit message
             COMMIT_MSG="$COMMIT_MSG
+
           Files updated:
           "
             for file in ${{ steps.replace_files.outputs.changed_files }}; do
@@ -533,21 +534,21 @@ jobs:
               if [ -n "$AUTHOR" ] || [ -n "$DATE" ]; then
                 COMMIT_MSG="$COMMIT_MSG
 
-              "
+          "
                 [ -n "$AUTHOR" ] && COMMIT_MSG="${COMMIT_MSG}Original-author: $AUTHOR
-              "
+          "
                 [ -n "$DATE" ] && COMMIT_MSG="${COMMIT_MSG}Original-date: $DATE
-              "
+          "
               fi
               
               # Add source info
               if [ "${{ github.event.inputs.patch_source_type }}" = "repo-commits" ]; then
                 COMMIT_HASH=$(echo "$PATCH_NAME" | grep -oE '[a-f0-9]{7,}')
                 COMMIT_MSG="${COMMIT_MSG}
-           Source: ${{ github.event.inputs.source_repo }}/commit/$COMMIT_HASH"
+          Source: ${{ github.event.inputs.source_repo }}/commit/$COMMIT_HASH"
               else
                 COMMIT_MSG="${COMMIT_MSG}
-           Source: Raw patch file"
+          Source: Raw patch file"
               fi
               
               # Commit the changes with detailed message
@@ -574,11 +575,11 @@ jobs:
                     # Create commit message for partial patch
                     COMMIT_MSG="[PARTIAL] $SUBJECT
 
-               ⚠️ This patch was partially applied. Some hunks failed.
-               Check workflow logs for rejected hunks.
-              "
+          ⚠️ This patch was partially applied. Some hunks failed.
+          Check workflow logs for rejected hunks.
+           "
                     [ -n "$AUTHOR" ] && COMMIT_MSG="${COMMIT_MSG}
-              Original-author: $AUTHOR"
+           Original-author: $AUTHOR"
                     
                     git add -A
                     git commit -m "$COMMIT_MSG" || true
