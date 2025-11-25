@@ -428,15 +428,37 @@ jobs:
             echo "Testing: $PATCH_NAME"
             echo ""
             
+            # Pre-create directories for new files in the patch (for dry-run testing)
+            echo "Checking for new files in patch..."
+            NEW_FILES=$(grep -E "^\+\+\+ b/" "$patch_file" | sed 's|^+++ b/||' || true)
+            for new_file in $NEW_FILES; do
+              if [ ! -f "$new_file" ]; then
+                new_dir=$(dirname "$new_file")
+                if [ ! -d "$new_dir" ]; then
+                  echo "  Would create directory: $new_dir"
+                  mkdir -p "$new_dir"
+                fi
+                echo "  Would create new file: $new_file"
+              fi
+            done
+            echo ""
+            
             REJECT_FILE="/tmp/rejects/${PATCH_NAME}.rej"
             
-            if patch --dry-run -p1 -F ${{ github.event.inputs.fuzz_factor }} -l --no-backup-if-mismatch --reject-file="$REJECT_FILE" < "$patch_file" 2>&1 | tee /tmp/patch_output.txt; then
+            # Use -N flag to handle new files
+            if patch --dry-run -p1 -N -F ${{ github.event.inputs.fuzz_factor }} -l --no-backup-if-mismatch --reject-file="$REJECT_FILE" < "$patch_file" 2>&1 | tee /tmp/patch_output.txt; then
               echo "✓ Would apply cleanly"
               
               # Show what would change
               echo ""
-              echo "Files that would be modified:"
-              grep -E "^patching file" /tmp/patch_output.txt | sed 's/patching file /  - /'
+              if grep -q "creating" /tmp/patch_output.txt; then
+                echo "New files that would be created:"
+                grep "creating" /tmp/patch_output.txt | sed 's/^/  /'
+              fi
+              if grep -q "patching file" /tmp/patch_output.txt; then
+                echo "Files that would be modified:"
+                grep "patching file" /tmp/patch_output.txt | sed 's/patching file /  - /'
+              fi
               
               SUCCESS=$((SUCCESS + 1))
             else
@@ -522,11 +544,45 @@ jobs:
             [ -n "$DATE" ] && echo "Date: $DATE"
             echo ""
             
+            # Pre-create directories for new files in the patch
+            echo "Checking for new files in patch..."
+            NEW_FILES=$(grep -E "^\+\+\+ b/" "$patch_file" | sed 's|^+++ b/||' || true)
+            for new_file in $NEW_FILES; do
+              if [ ! -f "$new_file" ]; then
+                new_dir=$(dirname "$new_file")
+                if [ ! -d "$new_dir" ]; then
+                  echo "  Creating directory: $new_dir"
+                  mkdir -p "$new_dir"
+                fi
+              fi
+            done
+            echo ""
+            
             REJECT_FILE="/tmp/rejects/${PATCH_NAME}.rej"
             
-            if patch -p1 -F ${{ github.event.inputs.fuzz_factor }} -l --ignore-whitespace --no-backup-if-mismatch --reject-file="$REJECT_FILE" < "$patch_file" 2>&1 | tee /tmp/patch_output.txt; then
+            # Apply patch with options to handle new files:
+            # -p1: Strip one level of path
+            # -F: Fuzz factor (higher = more tolerant)
+            # -l: Ignore whitespace changes
+            # --ignore-whitespace: Ignore whitespace differences
+            # --no-backup-if-mismatch: Don't create .orig files
+            # --reject-file: Save rejects to temp location
+            # -N: Treat absent files as empty (allows creating new files)
+            if patch -p1 -N -F ${{ github.event.inputs.fuzz_factor }} -l --ignore-whitespace --no-backup-if-mismatch --reject-file="$REJECT_FILE" < "$patch_file" 2>&1 | tee /tmp/patch_output.txt; then
               echo "✓ Applied successfully"
               SUCCESS=$((SUCCESS + 1))
+              
+              # Show which files were created vs modified
+              echo ""
+              if grep -q "creating" /tmp/patch_output.txt; then
+                echo "New files created:"
+                grep "creating" /tmp/patch_output.txt | sed 's/^/  /'
+              fi
+              if grep -q "patching file" /tmp/patch_output.txt; then
+                echo "Files modified:"
+                grep "patching file" /tmp/patch_output.txt | sed 's/^/  /'
+              fi
+              echo ""
               
               # Create detailed commit message
               COMMIT_MSG="$SUBJECT"
@@ -577,9 +633,9 @@ jobs:
 
           ⚠️ This patch was partially applied. Some hunks failed.
           Check workflow logs for rejected hunks.
-           "
+          "
                     [ -n "$AUTHOR" ] && COMMIT_MSG="${COMMIT_MSG}
-           Original-author: $AUTHOR"
+          Original-author: $AUTHOR"
                     
                     git add -A
                     git commit -m "$COMMIT_MSG" || true
